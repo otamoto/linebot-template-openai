@@ -42,7 +42,6 @@ app = FastAPI()
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-FIREBASE_CONFIG_JSON = os.getenv('FIREBASE_CONFIG')
 
 # インスタンス化
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -50,25 +49,19 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- Firebase初期化（秘密鍵の改行エラーを強制修正） ---
+# --- Firebase初期化（ファイルを直接読み込む方式） ---
+# 注意：GitHubに 'firebase-key.json' という名前で秘密鍵をアップロードしておいてください
 if not firebase_admin._apps:
     try:
-        if not FIREBASE_CONFIG_JSON:
-            raise ValueError("環境変数 FIREBASE_CONFIG が空です。")
-        
-        # JSONをパース
-        cred_dict = json.loads(FIREBASE_CONFIG_JSON, strict=False)
-        
-        # 【重要】Herokuで壊れやすい秘密鍵の改行コード（\n）を正常な形に置換
-        if 'private_key' in cred_dict:
-            cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
+        key_path = os.path.join(current_dir, 'firebase-key.json')
+        if not os.path.exists(key_path):
+            raise FileNotFoundError(f"{key_path} が見つかりません。GitHubにアップロードされているか確認してください。")
             
-        cred = credentials.Certificate(cred_dict)
+        cred = credentials.Certificate(key_path)
         firebase_admin.initialize_app(cred)
-        logger.info("Firebase initialization successful.")
+        logger.info("Firebase has been initialized successfully using local file.")
     except Exception as e:
         logger.error(f"Firebase Initialization Failed: {e}")
-        # 起動を止めてログに詳細を残す
         raise
 
 db = firestore.client()
@@ -78,7 +71,7 @@ def generate_mystical_message(user_text):
     prompt = (
         f"あなたは『識（SHIKI）』。孤独を肯定し、静かに寄り添う存在です。\n"
         f"ユーザーの昨日の言葉：『{user_text}』\n"
-        f"この言葉を受け止め、今日という静かな始まりに相応しい、占い的な示唆を含むメッセージを80文字以内で作成してください。\n"
+        f"この言葉を受け止め、今日を歩むための占い的な示唆を含むメッセージを80文字以内で作成してください。\n"
         f"語尾に必ず「――識より」を添えて。"
     )
     try:
@@ -97,7 +90,7 @@ def root():
 
 @app.get("/morning-push")
 def morning_push():
-    """手動またはSchedulerでプッシュ通知を送るURL"""
+    """プッシュ通知を実行するURL"""
     try:
         # Firebaseから is_premium == True のユーザーを検索
         users_ref = db.collection('users').where('is_premium', '==', True).stream()
@@ -122,7 +115,7 @@ def morning_push():
 
 @app.post("/callback")
 async def callback(request: Request):
-    """LINE Messaging APIのWebhook受付"""
+    """LINEからのWebhook受付"""
     signature = request.headers.get('X-Line-Signature')
     body = await request.body()
     try:
@@ -133,11 +126,10 @@ async def callback(request: Request):
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
-    """ユーザーからの返信をFirebaseに保存"""
+    """返信をFirebaseに保存"""
     u_id = event.source.user_id
     u_text = event.message.text
     
-    # ユーザーデータを更新（merge=Trueで既存データを壊さない）
     db.collection('users').document(u_id).set({
         'last_msg': u_text,
         'last_active': datetime.now()
