@@ -8,7 +8,7 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- パス設定：同じフォルダのファイルを確実に見つける ---
+# --- パス設定：自作モジュールを確実に見つける ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
@@ -23,7 +23,7 @@ try:
     import firebase_admin
     from firebase_admin import credentials, firestore
 except ImportError as e:
-    logger.error(f"Required library missing: {e}")
+    logger.error(f"必須ライブラリが不足しています: {e}")
     raise
 
 # --- 自作エンジンのインポート ---
@@ -33,7 +33,7 @@ except ImportError:
     try:
         from .oracle_engine import OracleEngine, EngineState
     except ImportError as e:
-        logger.error(f"oracle_engine.py not found: {e}")
+        logger.error(f"oracle_engine.py が見つかりません: {e}")
 
 # --- アプリ初期化 ---
 app = FastAPI()
@@ -50,20 +50,25 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- Firebase初期化（JSONパースエラー対策済み） ---
+# --- Firebase初期化（秘密鍵の改行エラーを強制修正） ---
 if not firebase_admin._apps:
     try:
         if not FIREBASE_CONFIG_JSON:
-            raise ValueError("Environment variable FIREBASE_CONFIG is empty.")
+            raise ValueError("環境変数 FIREBASE_CONFIG が空です。")
         
-        # strict=False にすることで、コピー時の改行コードの乱れを許容して読み込む
+        # JSONをパース
         cred_dict = json.loads(FIREBASE_CONFIG_JSON, strict=False)
+        
+        # 【重要】Herokuで壊れやすい秘密鍵の改行コード（\n）を正常な形に置換
+        if 'private_key' in cred_dict:
+            cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
+            
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
         logger.info("Firebase initialization successful.")
     except Exception as e:
         logger.error(f"Firebase Initialization Failed: {e}")
-        # ここで止まらないようにダミーをセットする場合もありますが、今回はエラーログを優先
+        # 起動を止めてログに詳細を残す
         raise
 
 db = firestore.client()
@@ -72,46 +77,52 @@ db = firestore.client()
 def generate_mystical_message(user_text):
     prompt = (
         f"あなたは『識（SHIKI）』。孤独を肯定し、静かに寄り添う存在です。\n"
-        f"昨日の言葉：『{user_text}』\n"
-        f"今日を歩むための占い的な一言を80文字以内で作成してください。語尾に「――識より」を付けて。"
+        f"ユーザーの昨日の言葉：『{user_text}』\n"
+        f"この言葉を受け止め、今日という静かな始まりに相応しい、占い的な示唆を含むメッセージを80文字以内で作成してください。\n"
+        f"語尾に必ず「――識より」を添えて。"
     )
     try:
         response = model.generate_content(prompt)
         return response.text
-    except:
-        return "新しい朝が来ました。そのままのあなたで。――識より"
+    except Exception as e:
+        logger.error(f"Gemini Error: {e}")
+        return "新しい朝が来ました。そのままのあなたで、今日を歩んでください。――識より"
 
 # --- エンドポイント ---
 
 @app.get("/")
 def root():
-    # サーバーが生きているか確認するためのURL
-    return {"message": "SHIKI System is Online."}
+    """サーバーの生存確認用"""
+    return {"status": "online", "service": "SHIKI System", "timestamp": str(datetime.now())}
 
 @app.get("/morning-push")
 def morning_push():
+    """手動またはSchedulerでプッシュ通知を送るURL"""
     try:
-        # is_premium が true のユーザーを取得
+        # Firebaseから is_premium == True のユーザーを検索
         users_ref = db.collection('users').where('is_premium', '==', True).stream()
         
         count = 0
         for user in users_ref:
             u_id = user.id
             u_data = user.to_dict()
-            last_msg = u_data.get('last_msg', "静かな心")
+            last_msg = u_data.get('last_msg', "新しい朝")
             
-            # 送信
+            # メッセージ生成
             msg_text = generate_mystical_message(last_msg)
+            
+            # LINE送信
             line_bot_api.push_message(u_id, TextSendMessage(text=msg_text))
             count += 1
             
         return {"status": "completed", "sent_count": count}
     except Exception as e:
-        logger.error(f"Push Error: {e}")
+        logger.error(f"Push Notification Error: {e}")
         return {"status": "error", "message": str(e)}
 
 @app.post("/callback")
 async def callback(request: Request):
+    """LINE Messaging APIのWebhook受付"""
     signature = request.headers.get('X-Line-Signature')
     body = await request.body()
     try:
@@ -122,11 +133,17 @@ async def callback(request: Request):
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
+    """ユーザーからの返信をFirebaseに保存"""
     u_id = event.source.user_id
     u_text = event.message.text
-    # ユーザー発言を更新
+    
+    # ユーザーデータを更新（merge=Trueで既存データを壊さない）
     db.collection('users').document(u_id).set({
         'last_msg': u_text,
         'last_active': datetime.now()
     }, merge=True)
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="あなたの言葉は、識の奥底へ。"))
+    
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text="あなたの言葉は、識の奥底に静かに刻まれました。")
+    )
