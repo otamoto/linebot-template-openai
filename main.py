@@ -8,7 +8,7 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- パス設定：oracle_engine.pyを確実に見つける ---
+# --- パス設定：同じフォルダのファイルを確実に見つける ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
@@ -38,7 +38,7 @@ except ImportError:
 # --- アプリ初期化 ---
 app = FastAPI()
 
-# --- 環境変数の取得と検証 ---
+# --- 環境変数の取得 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -50,19 +50,21 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- Firebase初期化（パースエラー対策済み） ---
+# --- Firebase初期化（JSONパースエラー対策済み） ---
 if not firebase_admin._apps:
     try:
         if not FIREBASE_CONFIG_JSON:
             raise ValueError("Environment variable FIREBASE_CONFIG is empty.")
         
-        # strict=False で制御文字や改行のミスを許容して読み込む
+        # strict=False にすることで、コピー時の改行コードの乱れを許容して読み込む
         cred_dict = json.loads(FIREBASE_CONFIG_JSON, strict=False)
         cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
-        logger.info("Firebase has been initialized successfully.")
+        logger.info("Firebase initialization successful.")
     except Exception as e:
         logger.error(f"Firebase Initialization Failed: {e}")
+        # ここで止まらないようにダミーをセットする場合もありますが、今回はエラーログを優先
+        raise
 
 db = firestore.client()
 
@@ -70,21 +72,20 @@ db = firestore.client()
 def generate_mystical_message(user_text):
     prompt = (
         f"あなたは『識（SHIKI）』。孤独を肯定し、静かに寄り添う存在です。\n"
-        f"ユーザーの昨日の言葉：『{user_text}』\n"
-        f"この言葉を受け止め、今日を歩むための占い的な示唆を含むメッセージを80文字以内で作成してください。\n"
-        f"語尾に「――識より」を付けて。"
+        f"昨日の言葉：『{user_text}』\n"
+        f"今日を歩むための占い的な一言を80文字以内で作成してください。語尾に「――識より」を付けて。"
     )
     try:
         response = model.generate_content(prompt)
         return response.text
-    except Exception as e:
-        logger.error(f"Gemini Error: {e}")
+    except:
         return "新しい朝が来ました。そのままのあなたで。――識より"
 
 # --- エンドポイント ---
 
 @app.get("/")
 def root():
+    # サーバーが生きているか確認するためのURL
     return {"message": "SHIKI System is Online."}
 
 @app.get("/morning-push")
@@ -99,7 +100,7 @@ def morning_push():
             u_data = user.to_dict()
             last_msg = u_data.get('last_msg', "静かな心")
             
-            # メッセージ生成と送信
+            # 送信
             msg_text = generate_mystical_message(last_msg)
             line_bot_api.push_message(u_id, TextSendMessage(text=msg_text))
             count += 1
@@ -123,14 +124,9 @@ async def callback(request: Request):
 def handle_text(event):
     u_id = event.source.user_id
     u_text = event.message.text
-    
-    # Firebase更新
+    # ユーザー発言を更新
     db.collection('users').document(u_id).set({
         'last_msg': u_text,
         'last_active': datetime.now()
     }, merge=True)
-    
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text="あなたの言葉は、識の奥底へ届きました。")
-    )
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="あなたの言葉は、識の奥底へ。"))
