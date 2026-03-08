@@ -73,33 +73,9 @@ def root():
     return {"message": "SHIKI System is online."}
 
 @app.get("/morning-push")
+@app.get("/morning-push")
 def morning_push():
-    """朝のプッシュ通知を実行するURL"""
-    try:
-        # is_premium が true のユーザーを取得
-        users = db.collection('users').where('is_premium', '==', True).stream()
-        
-        count = 0
-        # エンジンの初期化（n=2000のシミュレーション等）
-        engine = OracleEngine(EngineState())
-
-        for user in users:
-            u_id = user.id
-            u_data = user.to_dict()
-            last_msg = u_data.get('last_msg', "平穏な日々")
-            
-            # メッセージ生成
-            msg_text = generate_mystical_message(last_msg)
-            
-            # LINE送信
-            line_bot_api.push_message(u_id, TextSendMessage(text=msg_text))
-            count += 1
-            
-        return {"status": "completed", "sent_count": count}
-    except Exception as e:
-        logging.error(f"Morning Push Error: {e}")
-        return {"status": "error", "message": str(e)}
-
+    return {"status": "debug", "message": "Endpoint reached!"}
 @app.post("/callback")
 async def callback(request: Request):
     """LINEからのメッセージを受け取る口"""
