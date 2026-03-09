@@ -8,114 +8,83 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- パス設定：自作モジュールを確実に見つける ---
+# --- パス設定 ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
 
-# --- ライブラリのインポート ---
-try:
-    from fastapi import FastAPI, Request, HTTPException
-    from linebot import LineBotApi, WebhookHandler
-    from linebot.models import MessageEvent, TextMessage, TextSendMessage
-    from linebot.exceptions import InvalidSignatureError
-    import google.generativeai as genai
-    import firebase_admin
-    from firebase_admin import credentials, firestore
-except ImportError as e:
-    logger.error(f"必須ライブラリが不足しています: {e}")
-    raise
+# --- インポート ---
+from fastapi import FastAPI, Request, HTTPException
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.exceptions import InvalidSignatureError
+import google.generativeai as genai
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-# --- 自作エンジンのインポート ---
-try:
-    from oracle_engine import OracleEngine, EngineState
-except ImportError:
-    try:
-        from .oracle_engine import OracleEngine, EngineState
-    except ImportError as e:
-        logger.error(f"oracle_engine.py が見つかりません: {e}")
-
-# --- アプリ初期化 ---
+# --- 初期設定 ---
 app = FastAPI()
 
-# --- 環境変数の取得 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+FIREBASE_CONFIG_JSON = os.getenv('FIREBASE_CONFIG')
 
-# インスタンス化
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- Firebase初期化（ファイルを直接読み込む方式） ---
-# 注意：GitHubに 'firebase-key.json' という名前で秘密鍵をアップロードしておいてください
+# --- Firebase初期化（安全な環境変数読み込み版） ---
 if not firebase_admin._apps:
     try:
-        key_path = os.path.join(current_dir, 'firebase-key.json')
-        if not os.path.exists(key_path):
-            raise FileNotFoundError(f"{key_path} が見つかりません。GitHubにアップロードされているか確認してください。")
+        if not FIREBASE_CONFIG_JSON:
+            raise ValueError("FIREBASE_CONFIG is missing in Heroku Config Vars")
+        
+        # JSONとして読み込み、秘密鍵の改行エラーを補正
+        cred_dict = json.loads(FIREBASE_CONFIG_JSON, strict=False)
+        if 'private_key' in cred_dict:
+            cred_dict['private_key'] = cred_dict['private_key'].replace('\\n', '\n')
             
-        cred = credentials.Certificate(key_path)
+        cred = credentials.Certificate(cred_dict)
         firebase_admin.initialize_app(cred)
-        logger.info("Firebase has been initialized successfully using local file.")
+        logger.info("Firebase connection established.")
     except Exception as e:
-        logger.error(f"Firebase Initialization Failed: {e}")
-        raise
+        logger.error(f"Firebase Error: {e}")
+        # 起動を止めないための暫定処理（エラーログは残す）
 
 db = firestore.client()
 
-# --- メッセージ生成ロジック ---
+# --- ロジック ---
 def generate_mystical_message(user_text):
-    prompt = (
-        f"あなたは『識（SHIKI）』。孤独を肯定し、静かに寄り添う存在です。\n"
-        f"ユーザーの昨日の言葉：『{user_text}』\n"
-        f"この言葉を受け止め、今日を歩むための占い的な示唆を含むメッセージを80文字以内で作成してください。\n"
-        f"語尾に必ず「――識より」を添えて。"
-    )
+    prompt = f"あなたは『識（SHIKI）』。ユーザーの言葉『{user_text}』に寄り添う、80文字以内の占い的メッセージを。最後に「――識より」と付けて。"
     try:
         response = model.generate_content(prompt)
         return response.text
-    except Exception as e:
-        logger.error(f"Gemini Error: {e}")
-        return "新しい朝が来ました。そのままのあなたで、今日を歩んでください。――識より"
-
-# --- エンドポイント ---
+    except:
+        return "新しい朝が来ました。あなたのままで。――識より"
 
 @app.get("/")
 def root():
-    """サーバーの生存確認用"""
-    return {"status": "online", "service": "SHIKI System", "timestamp": str(datetime.now())}
+    return {"status": "online", "message": "SHIKI System is restored."}
 
 @app.get("/morning-push")
 def morning_push():
-    """プッシュ通知を実行するURL"""
     try:
-        # Firebaseから is_premium == True のユーザーを検索
-        users_ref = db.collection('users').where('is_premium', '==', True).stream()
-        
+        users = db.collection('users').where('is_premium', '==', True).stream()
         count = 0
-        for user in users_ref:
+        for user in users:
             u_id = user.id
-            u_data = user.to_dict()
-            last_msg = u_data.get('last_msg', "新しい朝")
-            
-            # メッセージ生成
+            last_msg = user.to_dict().get('last_msg', "平穏")
             msg_text = generate_mystical_message(last_msg)
-            
-            # LINE送信
             line_bot_api.push_message(u_id, TextSendMessage(text=msg_text))
             count += 1
-            
         return {"status": "completed", "sent_count": count}
     except Exception as e:
-        logger.error(f"Push Notification Error: {e}")
         return {"status": "error", "message": str(e)}
 
 @app.post("/callback")
 async def callback(request: Request):
-    """LINEからのWebhook受付"""
     signature = request.headers.get('X-Line-Signature')
     body = await request.body()
     try:
@@ -126,16 +95,9 @@ async def callback(request: Request):
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
-    """返信をFirebaseに保存"""
     u_id = event.source.user_id
-    u_text = event.message.text
-    
     db.collection('users').document(u_id).set({
-        'last_msg': u_text,
+        'last_msg': event.message.text,
         'last_active': datetime.now()
     }, merge=True)
-    
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text="あなたの言葉は、識の奥底に静かに刻まれました。")
-    )
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="識に刻まれました。"))
