@@ -38,6 +38,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # --- 必須環境変数チェック ---
 missing_vars = []
@@ -60,14 +61,14 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel(GEMINI_MODEL)
 
 # --- Firebase初期化（env JSON方式） ---
 if not firebase_admin._apps:
     try:
         key_dict = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
 
-        # 安全な確認ログ（秘密鍵そのものは出さない）
+        # 安全な確認ログ（秘密鍵全文は出さない）
         logger.info(f"Firebase project_id: {key_dict.get('project_id')}")
         logger.info(f"Firebase client_email: {key_dict.get('client_email')}")
         logger.info(f"Firebase private_key_id: {key_dict.get('private_key_id')}")
@@ -89,14 +90,38 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# --- 占いメッセージ生成ロジック ---
-def generate_mystical_message(user_text: str) -> str:
-    """昨日の言葉を元に、Geminiが占い的な示唆を生成する"""
+# --- Gemini応答生成 ---
+def generate_shiki_reply(user_text: str) -> str:
+    """
+    LINEで話しかけられたときの返信を生成
+    """
     prompt = (
-        f"あなたは神秘的な存在『識（SHIKI）』。孤独を肯定し、静かに寄り添います。\n"
-        f"ユーザーの昨日の言葉：『{user_text}』\n"
-        f"この言葉を元に、今日を歩むための占い的な一言を80文字以内で作成してください。\n"
-        f"語尾に必ず「――識より」を添えて。"
+        "あなたは神秘的な存在『識（SHIKI）』です。"
+        "孤独を否定せず、静かに寄り添い、少しだけ神秘的に答えてください。"
+        "説教はしません。"
+        "返答は1〜3文、140文字以内、日本語で自然に。"
+        "最後に毎回『――識より』を付けてください。"
+        f"\n\nユーザーの言葉: {user_text}"
+    )
+    try:
+        response = model.generate_content(prompt)
+        text = getattr(response, "text", None)
+        if text and text.strip():
+            return text.strip()
+        return "その言葉は、夜の水面に静かに沈みました。――識より"
+    except Exception as e:
+        logger.error(f"Gemini reply error: {e}")
+        return "その言葉は、夜の水面に静かに沈みました。――識より"
+
+def generate_mystical_message(user_text: str) -> str:
+    """
+    朝のプッシュ用メッセージ生成
+    """
+    prompt = (
+        "あなたは神秘的な存在『識（SHIKI）』。孤独を肯定し、静かに寄り添います。"
+        f"\nユーザーの昨日の言葉：『{user_text}』"
+        "\nこの言葉を元に、今日を歩むための占い的な一言を80文字以内で作成してください。"
+        "\n語尾に必ず「――識より」を添えて。"
     )
     try:
         response = model.generate_content(prompt)
@@ -105,14 +130,13 @@ def generate_mystical_message(user_text: str) -> str:
             return text.strip()
         return "新しい朝が来ました。そのままのあなたで。――識より"
     except Exception as e:
-        logger.error(f"Gemini Error: {e}")
+        logger.error(f"Gemini morning error: {e}")
         return "新しい朝が来ました。そのままのあなたで。――識より"
 
 # --- エンドポイント ---
 
 @app.get("/")
 def root():
-    """生存確認用"""
     return {
         "status": "online",
         "message": "SHIKI System is running."
@@ -120,23 +144,22 @@ def root():
 
 @app.get("/health")
 def health():
-    """簡易ヘルスチェック"""
     return {
         "status": "ok",
         "firebase_initialized": bool(firebase_admin._apps),
+        "gemini_model": GEMINI_MODEL,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 @app.get("/morning-push")
 def morning_push():
     """
-    Firestore の users コレクションにいる全ユーザーへ
-    個別の占いメッセージをプッシュ送信
+    Firestore の users コレクション全員に朝メッセージ送信
     """
     try:
         users_ref = db.collection("users").stream()
-
         count = 0
+
         for user in users_ref:
             u_id = user.id
             u_data = user.to_dict() or {}
@@ -158,7 +181,6 @@ def morning_push():
 
 @app.post("/callback")
 async def callback(request: Request):
-    """LINE Webhook用"""
     signature = request.headers.get("X-Line-Signature")
     body = await request.body()
 
@@ -177,11 +199,14 @@ async def callback(request: Request):
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text(event):
-    """ユーザーの言葉を記憶する"""
+    """
+    ユーザーの発言を保存し、Geminiで個別返信する
+    """
     try:
         u_id = event.source.user_id
         u_text = event.message.text
 
+        # 発言保存
         db.collection("users").document(u_id).set(
             {
                 "last_msg": u_text,
@@ -190,9 +215,12 @@ def handle_text(event):
             merge=True
         )
 
+        # 個別返信生成
+        reply_text = generate_shiki_reply(u_text)
+
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text="あなたの言葉は、識の奥底に静かに刻まれました。")
+            TextSendMessage(text=reply_text)
         )
 
     except Exception as e:
