@@ -1,3 +1,7 @@
-# Crashlytics plugin (for Android Studio and IntelliJ)
-__pycache__/main.cpython-310.pyc
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+.firebase/
 .DS_Store
