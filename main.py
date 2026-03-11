@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import re
+import unicodedata
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException
@@ -104,6 +106,112 @@ db = firestore.client()
 
 
 # -------------------------
+# 生年月日パース
+# -------------------------
+def normalize_text(text: str) -> str:
+    return unicodedata.normalize("NFKC", text.strip())
+
+
+def parse_japanese_era_date(text: str):
+    """
+    昭和 / 平成 / 令和 を西暦へ変換
+    """
+    text = normalize_text(text)
+    era_map = {
+        "昭和": 1925,  # 昭和1年 = 1926
+        "平成": 1988,  # 平成1年 = 1989
+        "令和": 2018   # 令和1年 = 2019
+    }
+
+    m = re.search(r"(昭和|平成|令和)\s*(元|\d+)\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
+    if not m:
+        return None
+
+    era_name = m.group(1)
+    era_year_raw = m.group(2)
+    month = int(m.group(3))
+    day = int(m.group(4))
+
+    era_year = 1 if era_year_raw == "元" else int(era_year_raw)
+    year = era_map[era_name] + era_year
+
+    try:
+        dt = datetime(year, month, day)
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def parse_birth_date(text: str):
+    """
+    幅広い生年月日入力を YYYY-MM-DD に変換する
+    受け付ける例:
+    - 1990-05-12
+    - 1990/5/12
+    - 1990年5月12日
+    - 19900512
+    - 1990512
+    - 昭和60年5月12日
+    - 平成3年11月2日
+    - 令和2年6月10日
+    """
+    text = normalize_text(text)
+
+    # 和暦
+    era_result = parse_japanese_era_date(text)
+    if era_result:
+        return era_result
+
+    # YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
+    m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", text)
+    if m:
+        year, month, day = map(int, m.groups())
+        try:
+            dt = datetime(year, month, day)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    # YYYY年M月D日
+    m = re.match(r"^(\d{4})年(\d{1,2})月(\d{1,2})日$", text)
+    if m:
+        year, month, day = map(int, m.groups())
+        try:
+            dt = datetime(year, month, day)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    # 8桁 YYYYMMDD
+    m = re.match(r"^(\d{4})(\d{2})(\d{2})$", text)
+    if m:
+        year, month, day = map(int, m.groups())
+        try:
+            dt = datetime(year, month, day)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    # 7桁 YYYYMDD または YYYYMM D
+    m = re.match(r"^(\d{4})(\d{1,2})(\d{1,2})$", text)
+    if m:
+        year = int(m.group(1))
+        month = int(m.group(2))
+        day = int(m.group(3))
+        try:
+            dt = datetime(year, month, day)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+
+    return None
+
+
+def looks_like_birth_date(text: str) -> bool:
+    return parse_birth_date(text) is not None
+
+
+# -------------------------
 # Gemini 応答生成（朝通知用）
 # -------------------------
 def generate_mystical_message(user_text: str) -> str:
@@ -204,7 +312,7 @@ def handle_text(event):
         user_doc = user_ref.get()
         user_data = user_doc.to_dict() or {}
 
-        # 1. 発言を保存
+        # 発言保存
         user_ref.set(
             {
                 "last_msg": u_text,
@@ -213,51 +321,125 @@ def handle_text(event):
             merge=True
         )
 
-        # 2. pending があれば「質問への回答」とみなして神託を返す
-        pending_question = user_data.get("pending_question")
-        pending_topic = user_data.get("pending_topic")
-        pending_context = user_data.get("pending_context")
-        pending_original_text = user_data.get("pending_original_text")
+        # --------------------------------
+        # 1. 生年月日入力の受け取り
+        # --------------------------------
+        if looks_like_birth_date(u_text):
+            parsed_birth = parse_birth_date(u_text)
+            if parsed_birth:
+                user_ref.set(
+                    {
+                        "birth_date": parsed_birth
+                    },
+                    merge=True
+                )
 
-        if pending_question and pending_topic and pending_context and pending_original_text:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(
+                        text=(
+                            f"生まれた日の気配を受け取りました。\n"
+                            f"{parsed_birth} として記録しておきます。"
+                        )
+                    )
+                )
+                return
+
+        # --------------------------------
+        # 2. 状態取得
+        # --------------------------------
+        conversation_state = user_data.get("conversation_state", "idle")
+        pending_questions = user_data.get("pending_questions", [])
+        question_step = int(user_data.get("question_step", 0))
+        question_answers = user_data.get("question_answers", [])
+        pending_original_text = user_data.get("pending_original_text")
+        current_topic = user_data.get("current_topic")
+        pending_context = user_data.get("pending_context")
+        is_paid = bool(user_data.get("is_paid", False))
+
+        # --------------------------------
+        # 3. 質問フロー中なら回答を受ける
+        # --------------------------------
+        if conversation_state == "awaiting_answers" and pending_questions and pending_original_text and current_topic and pending_context:
+            question_answers.append(u_text)
+            question_step += 1
+
+            # まだ次の質問がある
+            if question_step < len(pending_questions):
+                next_question = pending_questions[question_step]
+
+                user_ref.set(
+                    {
+                        "question_step": question_step,
+                        "question_answers": question_answers
+                    },
+                    merge=True
+                )
+
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=next_question)
+                )
+                return
+
+            # 質問が終わったので神託生成
             user_profile = {
-                "birth_month": int(user_data.get("birth_month", 6)),
+                "birth_month": 6,
                 "resilience": float(user_data.get("resilience", 0.55)),
                 "sensitivity": float(user_data.get("sensitivity", 0.70)),
                 "patience": float(user_data.get("patience", 0.45))
             }
+
+            birth_date = user_data.get("birth_date")
+            if birth_date:
+                try:
+                    user_profile["birth_month"] = int(birth_date.split("-")[1])
+                except Exception:
+                    pass
 
             memory = {
                 "repeat_count": int(user_data.get("repeat_count", 1)),
                 "volatility": float(user_data.get("volatility", 0.55))
             }
 
-            updated_context = oracle_engine.apply_observation_answer(
-                context_feats=pending_context,
-                answer_text=u_text
-            )
+            updated_context = dict(pending_context)
+            for ans in question_answers:
+                updated_context = oracle_engine.apply_observation_answer(updated_context, ans)
+
+            horizon = "week" if is_paid else "today"
 
             oracle_result = oracle_engine.predict(
                 user_profile=user_profile,
                 context_feats=updated_context,
                 user_text=pending_original_text,
                 date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                horizon="today",
-                memory=memory
+                horizon=horizon,
+                memory=memory,
+                is_paid=is_paid
             )
 
             reply_text = oracle_result["message"]
 
+            # 生年月日未登録なら自然に誘導
+            if not birth_date:
+                reply_text += (
+                    "\n\nもっと深く流れを視るには、生まれた日の気配も重ねた方が精度が上がります。"
+                    "\n生年月日は、1990-05-12、1990年5月12日、昭和60年5月12日 のような形で送ってもらえれば大丈夫です。"
+                )
+
+            # 状態クリア
             user_ref.set(
                 {
-                    "pending_question": firestore.DELETE_FIELD,
-                    "pending_topic": firestore.DELETE_FIELD,
-                    "pending_context": firestore.DELETE_FIELD,
+                    "conversation_state": "completed_reading",
+                    "pending_questions": firestore.DELETE_FIELD,
+                    "question_step": firestore.DELETE_FIELD,
+                    "question_answers": firestore.DELETE_FIELD,
                     "pending_original_text": firestore.DELETE_FIELD,
+                    "current_topic": firestore.DELETE_FIELD,
+                    "pending_context": firestore.DELETE_FIELD,
                     "last_topic": oracle_result["topic"],
                     "last_oracle_message": oracle_result["message"],
-                    "oracle_engine_version": oracle_result["engine_version"],
-                    "last_observation_answer": u_text
+                    "oracle_engine_version": oracle_result["engine_version"]
                 },
                 merge=True
             )
@@ -268,7 +450,9 @@ def handle_text(event):
             )
             return
 
-        # 3. 通常時はまず質問を1つ返す
+        # --------------------------------
+        # 4. 通常時：質問フロー開始
+        # --------------------------------
         detected_topic = oracle_engine.topic_classifier.classify(u_text)
 
         base_context = {
@@ -278,27 +462,33 @@ def handle_text(event):
             "urgency": float(user_data.get("urgency", 0.65))
         }
 
-        followup_questions = oracle_engine.question_engine.get_followup_questions(detected_topic)
-        first_question = followup_questions[0]
+        question_set = oracle_engine.question_engine.get_question_set(
+            topic=detected_topic,
+            is_paid=is_paid
+        )
+
+        first_question = question_set[0]
 
         user_ref.set(
             {
-                "pending_question": first_question,
-                "pending_topic": detected_topic,
-                "pending_context": base_context,
-                "pending_original_text": u_text
+                "conversation_state": "awaiting_answers",
+                "pending_questions": question_set,
+                "question_step": 0,
+                "question_answers": [],
+                "pending_original_text": u_text,
+                "current_topic": detected_topic,
+                "pending_context": base_context
             },
             merge=True
         )
 
-        reply_text = (
-            "観測をもう少しだけ深めます。\n"
-            f"{first_question}"
-        )
+        opening = "少しだけ深く視るために、いくつか聞かせてください。"
+        if is_paid:
+            opening = "では、もう少し深いところまで流れを視ます。順に答えてください。"
 
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=reply_text)
+            TextSendMessage(text=f"{opening}\n{first_question}")
         )
 
     except Exception as e:
