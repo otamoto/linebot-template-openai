@@ -196,7 +196,9 @@ def looks_like_birth_date(text: str) -> bool:
 # -------------------------
 def build_user_profile(user_data: dict) -> dict:
     user_profile = {
+        "birth_year": 1990,
         "birth_month": 6,
+        "birth_day": 15,
         "resilience": float(user_data.get("resilience", 0.55)),
         "sensitivity": float(user_data.get("sensitivity", 0.70)),
         "patience": float(user_data.get("patience", 0.45))
@@ -205,7 +207,10 @@ def build_user_profile(user_data: dict) -> dict:
     birth_date = user_data.get("birth_date")
     if birth_date:
         try:
-            user_profile["birth_month"] = int(birth_date.split("-")[1])
+            y, m, d = birth_date.split("-")
+            user_profile["birth_year"] = int(y)
+            user_profile["birth_month"] = int(m)
+            user_profile["birth_day"] = int(d)
         except Exception:
             pass
 
@@ -253,48 +258,41 @@ def slots_to_context(base_context: dict, known_slots: dict) -> dict:
     updated = dict(base_context or {})
     known_slots = known_slots or {}
 
-    emotion = known_slots.get("emotion", "")
-    continuity = known_slots.get("time_continuity", "")
-    desired_action = known_slots.get("desired_action", "")
-    relationship_distance = known_slots.get("relationship_distance", "")
-    main_stressor = known_slots.get("main_stressor", "")
-    detail_depth = known_slots.get("detail_depth", "")
+    emotion = str(known_slots.get("emotion", ""))
+    continuity = str(known_slots.get("time_continuity", ""))
+    desired_action = str(known_slots.get("desired_action", ""))
+    relationship_distance = str(known_slots.get("relationship_distance", ""))
+    main_stressor = str(known_slots.get("main_stressor", ""))
+    detail_depth = str(known_slots.get("detail_depth", ""))
 
-    emotion_text = str(emotion)
-    continuity_text = str(continuity)
-    desired_action_text = str(desired_action)
-    distance_text = str(relationship_distance)
-    stressor_text = str(main_stressor)
-    detail_text = str(detail_depth)
-
-    if any(x in emotion_text for x in ["焦", "不安", "ソワ", "落ち着かない"]):
+    if any(x in emotion for x in ["焦", "不安", "ソワ", "落ち着かない"]):
         updated["urgency"] = min(float(updated.get("urgency", 0.5)) + 0.15, 1.0)
-    if any(x in emotion_text for x in ["悲", "寂", "孤独", "つらい"]):
+    if any(x in emotion for x in ["悲", "寂", "孤独", "つらい"]):
         updated["loneliness"] = min(float(updated.get("loneliness", 0.5)) + 0.15, 1.0)
-    if any(x in emotion_text for x in ["怒", "イライラ", "腹立"]):
+    if any(x in emotion for x in ["怒", "イライラ", "腹立"]):
         updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.15, 1.0)
-    if any(x in emotion_text for x in ["何も感じない", "空虚", "虚しい", "無"]):
+    if any(x in emotion for x in ["何も感じない", "空虚", "虚しい", "無"]):
         updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.10, 1.0)
         updated["loneliness"] = min(float(updated.get("loneliness", 0.5)) + 0.10, 1.0)
 
-    if any(x in continuity_text for x in ["前から", "ずっと", "長い", "しばらく", "続いて"]):
+    if any(x in continuity for x in ["前から", "ずっと", "長い", "しばらく", "続いて"]):
         updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.05, 1.0)
 
-    if any(x in desired_action_text for x in ["待", "様子見", "少し置く"]):
+    if any(x in desired_action for x in ["待", "様子見", "少し置く"]):
         updated["urgency"] = max(float(updated.get("urgency", 0.5)) - 0.10, 0.0)
-    if any(x in desired_action_text for x in ["動きたい", "連絡", "伝えたい", "進めたい"]):
+    if any(x in desired_action for x in ["動きたい", "連絡", "伝えたい", "進めたい"]):
         updated["urgency"] = min(float(updated.get("urgency", 0.5)) + 0.10, 1.0)
 
-    if any(x in distance_text for x in ["かなり離", "遠い", "既読無視", "返事がない"]):
+    if any(x in relationship_distance for x in ["かなり離", "遠い", "既読無視", "返事がない"]):
         updated["loneliness"] = min(float(updated.get("loneliness", 0.5)) + 0.10, 1.0)
 
-    if any(x in stressor_text for x in ["仕事量", "忙し", "残業"]):
+    if any(x in main_stressor for x in ["仕事量", "忙し", "残業"]):
         updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.12, 1.0)
-    if any(x in stressor_text for x in ["人間関係", "上司", "同僚"]):
+    if any(x in main_stressor for x in ["人間関係", "上司", "同僚"]):
         updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.10, 1.0)
         updated["loneliness"] = min(float(updated.get("loneliness", 0.5)) + 0.05, 1.0)
 
-    if any(x in detail_text for x in ["眠れてない", "休めてない", "限界", "しんどい"]):
+    if any(x in detail_depth for x in ["眠れてない", "休めてない", "限界", "しんどい"]):
         updated["sleep_deficit"] = min(float(updated.get("sleep_deficit", 0.5)) + 0.15, 1.0)
         updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.10, 1.0)
 
@@ -319,40 +317,41 @@ def extract_json_from_text(text: str) -> dict:
     raise ValueError("JSONを抽出できませんでした")
 
 
+def call_gemini_json(prompt: str) -> dict:
+    response = model.generate_content(prompt)
+    raw_text = getattr(response, "text", "").strip()
+    return extract_json_from_text(raw_text)
+
+
+# -------------------------
+# 会話分析（神託前）
+# -------------------------
 def analyze_conversation_with_gemini(
     user_text: str,
-    user_data: dict,
     current_topic: str | None,
     known_slots: dict | None,
     last_question: str | None,
     is_paid: bool
 ) -> dict:
     known_slots = known_slots or {}
-
     topic_hint = current_topic or "unknown"
-    required = required_slots_for_topic(topic_hint if topic_hint != "unknown" else "relationship", is_paid)
 
     prompt = f"""
 あなたは会話整理専用の判定器です。
-ユーザーに見せる神託は作りません。
 必ずJSONのみを返してください。説明文は禁止です。
 
 目的:
 - ユーザーの今回の発言から、相談テーマ、取得済み情報、足りない情報、次に自然に聞くことを整理する
-- もし、前の質問にそのまま答えていなくても、会話として意味がある情報なら拾う
-- 相談が前の流れと明らかに変わったら、新しい相談として扱ってよい
-- 生年月日らしき入力はこの判定では扱わない（別処理済み）
+- 前の質問に直接答えていなくても、意味のある補足は拾う
+- 相談が明らかに別テーマへ変わったら switched_topic=true にする
+- 生年月日らしき入力はここでは扱わない（別処理済み）
 
 出力ルール:
 - JSONのみ
-- キーは英字
-- next_question はユーザーにそのまま見せる自然な日本語
-- should_generate_reading は、もう神託を返してよいなら true
-- topic は love / work / relationship のどれか
+- topic は love / work / relationship
 - extracted_slots は今回の発言から拾えた情報だけ
-- missing_slots は今なお足りない情報
-- answered_previous_question は true / false
-- switched_topic は true / false
+- next_question は自然な日本語
+- should_generate_reading は、もう神託を返してよいなら true
 
 現在のテーマ候補:
 {topic_hint}
@@ -366,7 +365,7 @@ def analyze_conversation_with_gemini(
 今回のユーザー発言:
 {user_text}
 
-参考となるスロット名:
+参考スロット:
 time_continuity, emotion, desired_action, relationship_distance, main_stressor, person_type, detail_depth
 
 テーマ別の最低必要情報:
@@ -374,10 +373,7 @@ time_continuity, emotion, desired_action, relationship_distance, main_stressor, 
 - work: time_continuity, emotion, main_stressor, desired_action
 - relationship: time_continuity, emotion, person_type, desired_action
 
-無料/有料:
-{"paid" if is_paid else "free"}
-
-JSONの形式:
+JSON形式:
 {{
   "topic": "love",
   "answered_previous_question": true,
@@ -388,13 +384,12 @@ JSONの形式:
   }},
   "missing_slots": ["relationship_distance", "desired_action"],
   "should_generate_reading": false,
-  "next_question": "相手との距離は今どうですか？ 近い感じですか、それとも少し離れていますか？"
+  "next_question": "相手との距離は今どうですか？ 近い感じですか、それとも少し離れていますか？",
+  "bridge_text": "その揺れは一時的なものではなさそうですね。"
 }}
 """.strip()
 
-    response = model.generate_content(prompt)
-    raw_text = getattr(response, "text", "").strip()
-    data = extract_json_from_text(raw_text)
+    data = call_gemini_json(prompt)
 
     if data.get("topic") not in ["love", "work", "relationship"]:
         data["topic"] = current_topic or "relationship"
@@ -416,6 +411,9 @@ JSONの形式:
 
     if not isinstance(data.get("next_question"), str):
         data["next_question"] = ""
+
+    if not isinstance(data.get("bridge_text"), str):
+        data["bridge_text"] = ""
 
     return data
 
@@ -469,14 +467,12 @@ def fallback_conversation_analysis(user_text: str, current_topic: str | None, kn
     question_map = {
         "time_continuity": "その悩みって、急に強くなった感じですか？ それとも前からずっと続いていましたか？",
         "emotion": "今の気持ちにいちばん近いのはどれですか？ 焦り / 悲しさ / イライラ / 何も感じない感じ",
-        "relationship_distance": "相手との距離は今どうですか？ 近い / 少し離れている / かなり離れている",
-        "desired_action": "今の気持ちはどちらに近いですか？ 動きたい / 様子を見たい / もう終わらせたい",
-        "main_stressor": "いちばんしんどいのはどれですか？ 仕事量 / 人間関係 / 将来の不安",
+        "relationship_distance": "相手との距離は今どうですか？ 近い感じですか、それとも少し離れていますか？",
+        "desired_action": "今は動きたいですか？ それとも少し様子を見たい気持ちの方が近いですか？",
+        "main_stressor": "いちばんしんどいのはどれに近いですか？ 仕事量 / 人間関係 / 将来の不安",
         "person_type": "その相手は誰に近いですか？ 家族 / 友人 / 職場 / 恋人",
         "detail_depth": "最近のあなたは、ちゃんと休めていますか？ それともかなり消耗していますか？",
     }
-
-    next_question = question_map.get(missing[0], "") if missing else ""
 
     return {
         "topic": topic,
@@ -485,31 +481,252 @@ def fallback_conversation_analysis(user_text: str, current_topic: str | None, kn
         "extracted_slots": extracted,
         "missing_slots": missing,
         "should_generate_reading": len(missing) == 0,
-        "next_question": next_question
+        "next_question": question_map.get(missing[0], "") if missing else "",
+        "bridge_text": "少しずつ輪郭が見えてきました。"
     }
 
 
-def get_conversation_analysis(user_text: str, user_data: dict, current_topic: str | None, known_slots: dict | None, last_question: str | None, is_paid: bool) -> dict:
+def get_conversation_analysis(user_text: str, current_topic: str | None, known_slots: dict | None, last_question: str | None, is_paid: bool) -> dict:
     try:
         return analyze_conversation_with_gemini(
             user_text=user_text,
-            user_data=user_data,
             current_topic=current_topic,
             known_slots=known_slots,
             last_question=last_question,
             is_paid=is_paid
         )
-    except Exception as e:
+    except Exception:
         logger.exception("Gemini conversation analysis failed, using fallback")
-        return fallback_conversation_analysis(
-            user_text=user_text,
-            current_topic=current_topic,
-            known_slots=known_slots,
-            is_paid=is_paid
-        )
+        return fallback_conversation_analysis(user_text, current_topic, known_slots, is_paid)
 
 
-def build_reading_reply(user_data: dict, active_text: str, topic: str, known_slots: dict, is_paid: bool) -> str:
+# -------------------------
+# 神託後の意図判定
+# -------------------------
+def analyze_post_oracle_with_gemini(user_text: str, last_oracle_message: str, oracle_summary: dict) -> dict:
+    prompt = f"""
+あなたは神託後の会話意図を判定する分類器です。
+必ずJSONのみを返してください。説明は禁止です。
+
+直前の神託:
+{last_oracle_message}
+
+内部要約:
+{json.dumps(oracle_summary, ensure_ascii=False)}
+
+ユーザー発言:
+{user_text}
+
+分類したい意図:
+- clarify_oracle: 神託をわかりやすく説明してほしい
+- ask_action_guidance: 結局どう動けばいいか聞いている
+- deepen_current_topic: 同じ相談をもっと深く見たい
+- emotional_reaction: 感情の吐露や反応
+- disagree_oracle: 納得できない、違う気がする
+- switch_new_consult: 新しい相談へ切り替えたい
+- other
+
+出力形式:
+{{
+  "intent": "clarify_oracle",
+  "refers_to_last_oracle": true,
+  "needs_new_prediction": false,
+  "reply_bridge": "わかりにくかったですね。もう少しかみ砕いて返します。"
+}}
+""".strip()
+
+    data = call_gemini_json(prompt)
+
+    allowed = {
+        "clarify_oracle",
+        "ask_action_guidance",
+        "deepen_current_topic",
+        "emotional_reaction",
+        "disagree_oracle",
+        "switch_new_consult",
+        "other"
+    }
+
+    if data.get("intent") not in allowed:
+        data["intent"] = "other"
+
+    if not isinstance(data.get("refers_to_last_oracle"), bool):
+        data["refers_to_last_oracle"] = True
+
+    if not isinstance(data.get("needs_new_prediction"), bool):
+        data["needs_new_prediction"] = False
+
+    if not isinstance(data.get("reply_bridge"), str):
+        data["reply_bridge"] = ""
+
+    return data
+
+
+def fallback_post_oracle_intent(user_text: str) -> dict:
+    txt = normalize_text(user_text)
+
+    if any(x in txt for x in ["どういうこと", "わかりやすく", "簡単に", "つまり", "意味"]):
+        intent = "clarify_oracle"
+    elif any(x in txt for x in ["どうしたら", "何をすれば", "結局", "行動", "連絡していい", "待てばいい"]):
+        intent = "ask_action_guidance"
+    elif any(x in txt for x in ["もっと詳しく", "深く", "相手の気持ち", "今週", "先も見て"]):
+        intent = "deepen_current_topic"
+    elif any(x in txt for x in ["違う", "違う気がする", "当たってない", "そんなことない"]):
+        intent = "disagree_oracle"
+    elif any(x in txt for x in ["ちなみに", "別件", "それとは別に", "仕事も", "家族も", "他にも"]):
+        intent = "switch_new_consult"
+    elif any(x in txt for x in ["つらい", "しんどい", "不安", "安心した", "少し楽"]):
+        intent = "emotional_reaction"
+    else:
+        intent = "other"
+
+    return {
+        "intent": intent,
+        "refers_to_last_oracle": True,
+        "needs_new_prediction": False,
+        "reply_bridge": ""
+    }
+
+
+def get_post_oracle_intent(user_text: str, last_oracle_message: str, oracle_summary: dict) -> dict:
+    try:
+        return analyze_post_oracle_with_gemini(user_text, last_oracle_message, oracle_summary)
+    except Exception:
+        logger.exception("Gemini post-oracle intent failed, using fallback")
+        return fallback_post_oracle_intent(user_text)
+
+
+# -------------------------
+# 神託後の返答生成
+# -------------------------
+def explain_oracle_simple(user_text: str, last_oracle_message: str, oracle_summary: dict) -> str:
+    prompt = f"""
+あなたは神秘的な存在『識（SHIKI）』です。
+ただし今回は新しい神託を作らず、直前に返した神託をわかりやすい言葉で説明してください。
+説教しないでください。
+長すぎず、2〜4文程度で、日本語で自然に返してください。
+神託の文面をそのまま繰り返さず、意味をかみ砕いてください。
+
+直前の神託:
+{last_oracle_message}
+
+内部要約:
+{json.dumps(oracle_summary, ensure_ascii=False)}
+
+ユーザーの聞き方:
+{user_text}
+""".strip()
+
+    try:
+        response = model.generate_content(prompt)
+        text = getattr(response, "text", "").strip()
+        if text:
+            return text
+    except Exception:
+        logger.exception("explain_oracle_simple failed")
+
+    return (
+        f"簡単に言うと、{oracle_summary.get('core_meaning', '今は流れを急いで掴みにいくより、整えながら見た方がいい時です。')}"
+        f"\n{oracle_summary.get('risk_hint', '')}"
+    )
+
+
+def explain_oracle_action(user_text: str, last_oracle_message: str, oracle_summary: dict) -> str:
+    prompt = f"""
+あなたは神秘的な存在『識（SHIKI）』です。
+ただし今回は新しい神託を作らず、直前の神託を行動レベルに落として返してください。
+ユーザーが「結局どうしたらいいのか」を知りたがっています。
+2〜4文程度で、日本語で自然に返してください。
+直前の神託をそのまま繰り返さないでください。
+
+直前の神託:
+{last_oracle_message}
+
+内部要約:
+{json.dumps(oracle_summary, ensure_ascii=False)}
+
+ユーザーの聞き方:
+{user_text}
+""".strip()
+
+    try:
+        response = model.generate_content(prompt)
+        text = getattr(response, "text", "").strip()
+        if text:
+            return text
+    except Exception:
+        logger.exception("explain_oracle_action failed")
+
+    return oracle_summary.get("action_hint", "今は答えを急ぐより、ひとつだけ整えてから次を見る方がよさそうです。")
+
+
+def respond_to_emotion(user_text: str, last_oracle_message: str, oracle_summary: dict) -> str:
+    prompt = f"""
+あなたは神秘的な存在『識（SHIKI）』です。
+今回は新しい神託ではなく、直前の神託に対するユーザーの感情反応に寄り添って返してください。
+やさしく、短く、自然な日本語で2〜4文。
+説教しないこと。神託をそのまま繰り返さないこと。
+
+直前の神託:
+{last_oracle_message}
+
+内部要約:
+{json.dumps(oracle_summary, ensure_ascii=False)}
+
+ユーザーの反応:
+{user_text}
+""".strip()
+
+    try:
+        response = model.generate_content(prompt)
+        text = getattr(response, "text", "").strip()
+        if text:
+            return text
+    except Exception:
+        logger.exception("respond_to_emotion failed")
+
+    return "その反応も自然です。いまは答えを急ぐより、自分の感覚がどう揺れているかを見失わないことの方が大事です。"
+
+
+def respond_to_disagreement(user_text: str, last_oracle_message: str, oracle_summary: dict) -> str:
+    prompt = f"""
+あなたは神秘的な存在『識（SHIKI）』です。
+ユーザーは直前の神託に違和感を持っています。
+言い返さず、守りに入らず、やわらかく受け止めてください。
+そのうえで、どの部分がズレているのかを一言聞き返す形で返してください。
+2〜4文、日本語で自然に。
+
+直前の神託:
+{last_oracle_message}
+
+内部要約:
+{json.dumps(oracle_summary, ensure_ascii=False)}
+
+ユーザーの反応:
+{user_text}
+""".strip()
+
+    try:
+        response = model.generate_content(prompt)
+        text = getattr(response, "text", "").strip()
+        if text:
+            return text
+    except Exception:
+        logger.exception("respond_to_disagreement failed")
+
+    return "ズレを感じたなら、それは大事な反応です。どの部分がいちばん違うと感じたのか、そこだけ教えてください。"
+
+
+def pre_oracle_bridge_text(known_slots: dict) -> str:
+    if known_slots.get("emotion") and known_slots.get("desired_action"):
+        return "だいぶ輪郭が見えてきました。では、今のあなたに近い流れを言葉にします。"
+    return "少しずつ流れの形が見えてきました。では、今視えているものを返します。"
+
+
+# -------------------------
+# 相談分析
+# -------------------------
+def build_reading_reply(user_data: dict, active_text: str, topic: str, known_slots: dict, is_paid: bool):
     base_context = user_data.get("last_context") or build_base_context(user_data)
     context_feats = slots_to_context(base_context, known_slots)
     user_profile = build_user_profile(user_data)
@@ -539,7 +756,7 @@ def build_reading_reply(user_data: dict, active_text: str, topic: str, known_slo
 
 
 # -------------------------
-# Gemini 応答生成（朝通知用）
+# 朝通知用
 # -------------------------
 def generate_mystical_message(user_text: str) -> str:
     prompt = (
@@ -648,13 +865,15 @@ def handle_text(event):
         )
 
         is_paid = bool(user_data.get("is_paid", False))
+        conversation_mode = user_data.get("conversation_mode", "idle")
 
         # --------------------------------
-        # 1. 生年月日入力なら保存して、その場で深読みし直す
+        # 1. 生年月日入力
         # --------------------------------
         if looks_like_birth_date(u_text):
             parsed_birth = parse_birth_date(u_text)
             if parsed_birth:
+                updated_user_data = {**user_data, "birth_date": parsed_birth}
                 user_ref.set({"birth_date": parsed_birth}, merge=True)
 
                 active_text = user_data.get("active_consultation_text") or user_data.get("last_consultation_text")
@@ -662,7 +881,6 @@ def handle_text(event):
                 known_slots = user_data.get("known_slots", {}) or {}
 
                 if active_text and current_topic:
-                    updated_user_data = {**user_data, "birth_date": parsed_birth}
                     reply_text, oracle_result, context_feats = build_reading_reply(
                         user_data=updated_user_data,
                         active_text=active_text,
@@ -675,8 +893,10 @@ def handle_text(event):
                         {
                             "last_topic": oracle_result["topic"],
                             "last_oracle_message": oracle_result["message"],
+                            "last_oracle_summary": oracle_result["summary"],
                             "oracle_engine_version": oracle_result["engine_version"],
-                            "last_context": context_feats
+                            "last_context": context_feats,
+                            "conversation_mode": "post_oracle"
                         },
                         merge=True
                     )
@@ -685,10 +905,10 @@ def handle_text(event):
                         event.reply_token,
                         TextSendMessage(
                             text=(
-                                f"生まれた日の気配を受け取りました。"
-                                f"{parsed_birth} として記録しておきます。\n\n"
+                                f"生まれた日の気配を受け取りました。{parsed_birth} として記録しておきます。\n\n"
+                                f"さっきの流れを、その巡りも重ねてもう一度視ました。\n"
                                 f"{reply_text}\n\n"
-                                f"もし前に預けた生年月日が違っていた場合も、今回の内容で上書きされています。"
+                                f"もし前に預けた内容が違っていた場合も、今回の内容で上書きされています。"
                             )
                         )
                     )
@@ -698,8 +918,7 @@ def handle_text(event):
                     event.reply_token,
                     TextSendMessage(
                         text=(
-                            f"生まれた日の気配を受け取りました。"
-                            f"{parsed_birth} として記録しておきます。\n"
+                            f"生まれた日の気配を受け取りました。{parsed_birth} として記録しておきます。\n"
                             f"もし前に預けた内容が違っていた場合も、今回の内容で上書きされています。"
                         )
                     )
@@ -707,14 +926,101 @@ def handle_text(event):
                 return
 
         # --------------------------------
-        # 2. 現在の会話状態を取得
+        # 2. 神託後モード
+        # --------------------------------
+        last_oracle_message = user_data.get("last_oracle_message")
+        last_oracle_summary = user_data.get("last_oracle_summary") or {}
+
+        if conversation_mode == "post_oracle" and last_oracle_message:
+            intent_data = get_post_oracle_intent(
+                user_text=u_text,
+                last_oracle_message=last_oracle_message,
+                oracle_summary=last_oracle_summary
+            )
+            intent = intent_data.get("intent", "other")
+
+            if intent == "clarify_oracle":
+                reply_text = explain_oracle_simple(u_text, last_oracle_message, last_oracle_summary)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+                return
+
+            if intent == "ask_action_guidance":
+                reply_text = explain_oracle_action(u_text, last_oracle_message, last_oracle_summary)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+                return
+
+            if intent == "emotional_reaction":
+                reply_text = respond_to_emotion(u_text, last_oracle_message, last_oracle_summary)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+                return
+
+            if intent == "disagree_oracle":
+                reply_text = respond_to_disagreement(u_text, last_oracle_message, last_oracle_summary)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+                return
+
+            if intent == "deepen_current_topic":
+                current_topic = user_data.get("current_topic") or user_data.get("last_topic") or "relationship"
+                known_slots = user_data.get("known_slots", {}) or {}
+                missing_slots = required_slots_for_topic(current_topic, True)  # 深掘りは有料前提に近い聞き方
+                missing_slots = [s for s in missing_slots if not known_slots.get(s)]
+
+                question_map = {
+                    "time_continuity": "その悩みって、急に強くなった感じですか？ それとも前からずっと続いていましたか？",
+                    "emotion": "今の気持ちにいちばん近いのはどれですか？ 焦り / 悲しさ / イライラ / 何も感じない感じ",
+                    "relationship_distance": "相手との距離は今どうですか？ 近い感じですか、それとも少し離れていますか？",
+                    "desired_action": "今は動きたいですか？ それとも少し様子を見たい気持ちの方が近いですか？",
+                    "main_stressor": "いちばんしんどいのはどれに近いですか？ 仕事量 / 人間関係 / 将来の不安",
+                    "person_type": "その相手は誰に近いですか？ 家族 / 友人 / 職場 / 恋人",
+                    "detail_depth": "最近のあなたは、ちゃんと休めていますか？ それともかなり消耗していますか？",
+                }
+
+                next_question = question_map.get(missing_slots[0], "もう少しだけ、今の流れを深く見るために教えてください。") if missing_slots else "もう少し深く見るために、今いちばん引っかかっている部分をそのまま話してください。"
+
+                user_ref.set(
+                    {
+                        "conversation_mode": "consulting",
+                        "last_question": next_question,
+                        "active_consultation_text": user_data.get("active_consultation_text") or user_data.get("last_consultation_text"),
+                        "current_topic": current_topic
+                    },
+                    merge=True
+                )
+
+                bridge = intent_data.get("reply_bridge") or "では、さっきの流れをもう少し深く見ます。"
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=f"{bridge}\n{next_question}")
+                )
+                return
+
+            if intent == "switch_new_consult":
+                user_ref.set(
+                    {
+                        "conversation_mode": "consulting",
+                        "current_topic": firestore.DELETE_FIELD,
+                        "active_consultation_text": firestore.DELETE_FIELD,
+                        "known_slots": firestore.DELETE_FIELD,
+                        "last_question": firestore.DELETE_FIELD
+                    },
+                    merge=True
+                )
+                # 下の新規相談処理へ流す
+
+            else:
+                # other は、まず前神託に対する軽い応答を返して様子を見る
+                reply_text = explain_oracle_simple(u_text, last_oracle_message, last_oracle_summary)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+                return
+
+        # --------------------------------
+        # 3. 相談進行中または新規相談
         # --------------------------------
         current_topic = user_data.get("current_topic")
         active_consultation_text = user_data.get("active_consultation_text")
         known_slots = user_data.get("known_slots", {}) or {}
         last_question = user_data.get("last_question")
 
-        # 相談が進行中でなければ、新しい相談として開始
         if not active_consultation_text:
             current_topic = oracle_engine.topic_classifier.classify(u_text)
             active_consultation_text = u_text
@@ -732,12 +1038,78 @@ def handle_text(event):
                 merge=True
             )
 
-        # --------------------------------
-        # 3. Geminiで自然会話解析
-        # --------------------------------
+            intake_opening = "その迷い、たしかに受け取りました。まだ答えを急がず、少しだけ流れの輪郭を確かめさせてください。"
+            analysis = get_conversation_analysis(
+                user_text=u_text,
+                current_topic=current_topic,
+                known_slots=known_slots,
+                last_question=None,
+                is_paid=is_paid
+            )
+
+            known_slots = merge_known_slots(known_slots, analysis.get("extracted_slots", {}))
+            required = required_slots_for_topic(current_topic, is_paid)
+            missing_slots = [s for s in required if not known_slots.get(s)]
+            should_generate = analysis.get("should_generate_reading", False) or len(missing_slots) == 0
+
+            if not should_generate:
+                next_question = analysis.get("next_question", "").strip()
+                if not next_question:
+                    next_question = "まずひとつだけ聞かせてください。今の気持ちにいちばん近いのは、不安・悲しさ・イライラ・何も感じない感じのどれですか？"
+
+                user_ref.set(
+                    {
+                        "conversation_mode": "consulting",
+                        "current_topic": current_topic,
+                        "active_consultation_text": active_consultation_text,
+                        "known_slots": known_slots,
+                        "missing_slots": missing_slots,
+                        "last_question": next_question
+                    },
+                    merge=True
+                )
+
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=f"{intake_opening}\n{next_question}")
+                )
+                return
+
+            bridge = "だいぶ輪郭が見えてきました。では、今のあなたに近い流れを言葉にします。"
+            reply_text, oracle_result, context_feats = build_reading_reply(
+                user_data={**user_data, "known_slots": known_slots},
+                active_text=active_consultation_text,
+                topic=current_topic,
+                known_slots=known_slots,
+                is_paid=is_paid
+            )
+
+            final_text = f"{bridge}\n\n{reply_text}"
+
+            user_ref.set(
+                {
+                    "conversation_mode": "post_oracle",
+                    "current_topic": current_topic,
+                    "active_consultation_text": active_consultation_text,
+                    "known_slots": known_slots,
+                    "missing_slots": [],
+                    "last_question": firestore.DELETE_FIELD,
+                    "last_topic": oracle_result["topic"],
+                    "last_oracle_message": oracle_result["message"],
+                    "last_oracle_summary": oracle_result["summary"],
+                    "oracle_engine_version": oracle_result["engine_version"],
+                    "last_consultation_text": active_consultation_text,
+                    "last_context": context_feats
+                },
+                merge=True
+            )
+
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=final_text))
+            return
+
+        # 既存相談の続き
         analysis = get_conversation_analysis(
             user_text=u_text,
-            user_data=user_data,
             current_topic=current_topic,
             known_slots=known_slots,
             last_question=last_question,
@@ -748,43 +1120,21 @@ def handle_text(event):
             current_topic = analysis["topic"]
             active_consultation_text = u_text
             known_slots = {}
-            user_ref.set(
-                {
-                    "current_topic": current_topic,
-                    "active_consultation_text": active_consultation_text,
-                    "known_slots": {},
-                    "last_consultation_text": u_text
-                },
-                merge=True
-            )
+            last_question = None
 
-        extracted_slots = analysis.get("extracted_slots", {}) or {}
+        extracted_slots = analysis.get("extracted_slots", {})
         known_slots = merge_known_slots(known_slots, extracted_slots)
 
         required = required_slots_for_topic(current_topic, is_paid)
         missing_slots = [s for s in required if not known_slots.get(s)]
+        should_generate = analysis.get("should_generate_reading", False) or len(missing_slots) == 0
 
-        should_generate = analysis.get("should_generate_reading", False)
-        if len(missing_slots) == 0:
-            should_generate = True
-
-        # --------------------------------
-        # 4. まだ足りなければ自然な追加質問
-        # --------------------------------
         if not should_generate:
             next_question = analysis.get("next_question", "").strip()
+            bridge_text = analysis.get("bridge_text", "").strip()
 
             if not next_question:
-                fallback = {
-                    "time_continuity": "その悩みって、急に強くなった感じですか？ それとも前からずっと続いていましたか？",
-                    "emotion": "今の気持ちにいちばん近いのはどれですか？ 焦り / 悲しさ / イライラ / 何も感じない感じ",
-                    "relationship_distance": "相手との距離は今どうですか？ 近い感じですか、それとも少し離れていますか？",
-                    "desired_action": "今は動きたいですか？ それとも少し様子を見たい気持ちの方が近いですか？",
-                    "main_stressor": "いちばんしんどいのはどれに近いですか？ 仕事量 / 人間関係 / 将来の不安",
-                    "person_type": "その相手は誰に近いですか？ 家族 / 友人 / 職場 / 恋人",
-                    "detail_depth": "最近のあなたは、ちゃんと休めていますか？ それともかなり消耗していますか？",
-                }
-                next_question = fallback.get(missing_slots[0], "もう少しだけ、今の状況を教えてください。")
+                next_question = "もう少しだけ聞かせてください。"
 
             user_ref.set(
                 {
@@ -798,15 +1148,12 @@ def handle_text(event):
                 merge=True
             )
 
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=next_question)
-            )
+            reply_text = f"{bridge_text}\n{next_question}" if bridge_text else next_question
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
             return
 
-        # --------------------------------
-        # 5. 神託生成
-        # --------------------------------
+        # 神託生成
+        bridge = pre_oracle_bridge_text(known_slots)
         reply_text, oracle_result, context_feats = build_reading_reply(
             user_data={**user_data, "known_slots": known_slots},
             active_text=active_consultation_text,
@@ -815,9 +1162,11 @@ def handle_text(event):
             is_paid=is_paid
         )
 
+        final_text = f"{bridge}\n\n{reply_text}"
+
         user_ref.set(
             {
-                "conversation_mode": "completed_reading",
+                "conversation_mode": "post_oracle",
                 "current_topic": current_topic,
                 "active_consultation_text": active_consultation_text,
                 "known_slots": known_slots,
@@ -825,6 +1174,7 @@ def handle_text(event):
                 "last_question": firestore.DELETE_FIELD,
                 "last_topic": oracle_result["topic"],
                 "last_oracle_message": oracle_result["message"],
+                "last_oracle_summary": oracle_result["summary"],
                 "oracle_engine_version": oracle_result["engine_version"],
                 "last_consultation_text": active_consultation_text,
                 "last_context": context_feats
@@ -832,10 +1182,7 @@ def handle_text(event):
             merge=True
         )
 
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply_text)
-        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=final_text))
 
     except Exception as e:
         logger.exception("handle_text error")
