@@ -218,6 +218,7 @@ def handle_text(event):
         u_id = event.source.user_id
         u_text = event.message.text.strip()
 
+        # 1. ユーザー発言を保存
         db.collection("users").document(u_id).set(
             {
                 "last_msg": u_text,
@@ -226,8 +227,54 @@ def handle_text(event):
             merge=True
         )
 
-        reply_text = generate_shiki_reply(u_text)
+        # 2. Firestoreからユーザー情報を取得
+        user_doc = db.collection("users").document(u_id).get()
+        user_data = user_doc.to_dict() or {}
 
+        # 3. Oracle Engine に渡すための仮データを作る
+        #    今は固定値ベース。今後ここを質問回答や履歴で育てる
+        user_profile = {
+            "birth_month": int(user_data.get("birth_month", 6)),
+            "resilience": float(user_data.get("resilience", 0.55)),
+            "sensitivity": float(user_data.get("sensitivity", 0.70)),
+            "patience": float(user_data.get("patience", 0.45))
+        }
+
+        context_feats = {
+            "stress": float(user_data.get("stress", 0.60)),
+            "sleep_deficit": float(user_data.get("sleep_deficit", 0.50)),
+            "loneliness": float(user_data.get("loneliness", 0.55)),
+            "urgency": float(user_data.get("urgency", 0.65))
+        }
+
+        memory = {
+            "repeat_count": int(user_data.get("repeat_count", 1)),
+            "volatility": float(user_data.get("volatility", 0.55))
+        }
+
+        # 4. Oracle Engine で神託生成
+        oracle_result = oracle_engine.predict(
+            user_profile=user_profile,
+            context_feats=context_feats,
+            user_text=u_text,
+            date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            horizon="today",
+            memory=memory
+        )
+
+        reply_text = oracle_result["message"]
+
+        # 5. 結果の一部を保存
+        db.collection("users").document(u_id).set(
+            {
+                "last_topic": oracle_result["topic"],
+                "last_oracle_message": oracle_result["message"],
+                "oracle_engine_version": oracle_result["engine_version"]
+            },
+            merge=True
+        )
+
+        # 6. LINE返信
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=reply_text)
@@ -238,7 +285,7 @@ def handle_text(event):
         try:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text="少しだけ、識の声が乱れました。もう一度試してください。")
+                TextSendMessage(text="識の観測にわずかな乱れが生じました。少し時間を置いてもう一度声をかけてください。――識より")
             )
         except Exception:
             logger.exception("Reply fallback failed")
