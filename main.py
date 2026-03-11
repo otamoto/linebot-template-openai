@@ -217,8 +217,12 @@ def handle_text(event):
         u_id = event.source.user_id
         u_text = event.message.text.strip()
 
-        # 1. ユーザー発言を保存
-        db.collection("users").document(u_id).set(
+        user_ref = db.collection("users").document(u_id)
+        user_doc = user_ref.get()
+        user_data = user_doc.to_dict() or {}
+
+        # 1. まず発言を保存
+        user_ref.set(
             {
                 "last_msg": u_text,
                 "last_active": datetime.now(timezone.utc)
@@ -226,54 +230,93 @@ def handle_text(event):
             merge=True
         )
 
-        # 2. Firestoreからユーザー情報を取得
-        user_doc = db.collection("users").document(u_id).get()
-        user_data = user_doc.to_dict() or {}
+        # 2. もし「質問待ち状態」なら、その答えを使って神託を返す
+        pending_question = user_data.get("pending_question")
+        pending_topic = user_data.get("pending_topic")
+        pending_context = user_data.get("pending_context")
 
-        # 3. Oracle Engine に渡すための仮データを作る
-        #    今は固定値ベース。今後ここを質問回答や履歴で育てる
-        user_profile = {
-            "birth_month": int(user_data.get("birth_month", 6)),
-            "resilience": float(user_data.get("resilience", 0.55)),
-            "sensitivity": float(user_data.get("sensitivity", 0.70)),
-            "patience": float(user_data.get("patience", 0.45))
-        }
+        if pending_question and pending_topic and pending_context:
+            # 仮のユーザープロファイル
+            user_profile = {
+                "birth_month": int(user_data.get("birth_month", 6)),
+                "resilience": float(user_data.get("resilience", 0.55)),
+                "sensitivity": float(user_data.get("sensitivity", 0.70)),
+                "patience": float(user_data.get("patience", 0.45))
+            }
 
-        context_feats = {
+            memory = {
+                "repeat_count": int(user_data.get("repeat_count", 1)),
+                "volatility": float(user_data.get("volatility", 0.55))
+            }
+
+            # 観測回答を context に反映
+            updated_context = oracle_engine.apply_observation_answer(
+                context_feats=pending_context,
+                answer_text=u_text
+            )
+
+            # 神託生成
+            oracle_result = oracle_engine.predict(
+                user_profile=user_profile,
+                context_feats=updated_context,
+                user_text=user_data.get("pending_original_text", u_text),
+                date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                horizon="today",
+                memory=memory
+            )
+
+            reply_text = oracle_result["message"]
+
+            # pending を消して、結果を保存
+            user_ref.set(
+                {
+                    "pending_question": firestore.DELETE_FIELD,
+                    "pending_topic": firestore.DELETE_FIELD,
+                    "pending_context": firestore.DELETE_FIELD,
+                    "pending_original_text": firestore.DELETE_FIELD,
+                    "last_topic": oracle_result["topic"],
+                    "last_oracle_message": oracle_result["message"],
+                    "oracle_engine_version": oracle_result["engine_version"],
+                    "last_observation_answer": u_text
+                },
+                merge=True
+            )
+
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply_text)
+            )
+            return
+
+        # 3. 通常時：まずはテーマ判定して、観測質問を1つ返す
+        detected_topic = oracle_engine.topic_classifier.classify(u_text)
+
+        base_context = {
             "stress": float(user_data.get("stress", 0.60)),
             "sleep_deficit": float(user_data.get("sleep_deficit", 0.50)),
             "loneliness": float(user_data.get("loneliness", 0.55)),
             "urgency": float(user_data.get("urgency", 0.65))
         }
 
-        memory = {
-            "repeat_count": int(user_data.get("repeat_count", 1)),
-            "volatility": float(user_data.get("volatility", 0.55))
-        }
+        followup_questions = oracle_engine.question_engine.get_followup_questions(detected_topic)
+        first_question = followup_questions[0]
 
-        # 4. Oracle Engine で神託生成
-        oracle_result = oracle_engine.predict(
-            user_profile=user_profile,
-            context_feats=context_feats,
-            user_text=u_text,
-            date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            horizon="today",
-            memory=memory
-        )
-
-        reply_text = oracle_result["message"]
-
-        # 5. 結果の一部を保存
-        db.collection("users").document(u_id).set(
+        # 質問待ち状態を保存
+        user_ref.set(
             {
-                "last_topic": oracle_result["topic"],
-                "last_oracle_message": oracle_result["message"],
-                "oracle_engine_version": oracle_result["engine_version"]
+                "pending_question": first_question,
+                "pending_topic": detected_topic,
+                "pending_context": base_context,
+                "pending_original_text": u_text
             },
             merge=True
         )
 
-        # 6. LINE返信
+        reply_text = (
+            f"観測をもう少しだけ深めます。\n"
+            f"{first_question}"
+        )
+
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=reply_text)
@@ -284,7 +327,7 @@ def handle_text(event):
         try:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text="識の観測にわずかな乱れが生じました。少し時間を置いてもう一度声をかけてください。――識より")
+                TextSendMessage(text="識の観測にわずかな乱れが生じました。少し時間を置いてもう一度声をかけてください。")
             )
         except Exception:
             logger.exception("Reply fallback failed")
