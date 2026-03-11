@@ -70,6 +70,9 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(GEMINI_MODEL)
 
+oracle_state = EngineState()
+oracle_engine = OracleEngine(oracle_state)
+
 
 # -------------------------
 # Firebase 初期化
