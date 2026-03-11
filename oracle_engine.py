@@ -53,72 +53,77 @@ class TopicClassifier:
 
 
 class QuestionEngine:
-    def get_followup_questions(self, topic: str) -> List[str]:
-        common = [
-            "それは突然強くなった悩みですか？ それとも前から続いていますか？",
-            "今の気持ちに一番近いのは、焦り・悲しみ・怒り・空虚のどれですか？",
-            "今は動きたいですか？ それとも少し待ちたいですか？"
+    def get_question_set(self, topic: str, is_paid: bool = False) -> List[str]:
+        common_questions = [
+            "その悩みって、急に強くなった感じですか？ それとも前からずっと続いていましたか？",
+            "今の気持ちにいちばん近いのはどれですか？ 焦り / 悲しさ / イライラ / 何も感じない感じ"
         ]
 
-        topic_specific = {
+        topic_questions = {
             "love": [
-                "相手との距離は近いですか？ それとも今は離れていますか？",
-                "今のあなたは、追いたい・待ちたい・終わらせたい のどれに近いですか？"
+                "相手との距離は今どうですか？ 近い / 少し離れている / かなり離れている",
+                "今のあなたの気持ちはどれに近いですか？ 追いたい / 様子を見たい / もう終わらせたい"
             ],
             "work": [
-                "今の悩みは、仕事量・上司・同僚・将来不安のどれが一番強いですか？",
-                "今は辞めたいですか？ それとも耐えたいですか？"
+                "いちばんしんどいのはどれですか？ 仕事量 / 人間関係 / 将来の不安",
+                "今の気持ちはどちらに近いですか？ 辞めたい / もう少し耐えて様子を見たい"
             ],
             "relationship": [
-                "その相手は、家族・友人・職場・恋人のどれに近いですか？",
-                "今は修復したいですか？ それとも距離を置きたいですか？"
+                "その相手は誰に近いですか？ 家族 / 友人 / 職場 / 恋人",
+                "今の気持ちはどちらに近いですか？ 仲直りしたい / 少し距離を置きたい"
             ]
         }
 
-        return common + topic_specific.get(topic, [])
+        if is_paid:
+            # 有料は共通2問 + テーマ2問 = 4問では重いので、
+            # 共通2問 + テーマ1〜2問の計3問にする
+            return [common_questions[0], common_questions[1], topic_questions.get(topic, ["今の状況をもう少し詳しく教えてください。"])[0]]
+        else:
+            # 無料は2問
+            return [common_questions[0], topic_questions.get(topic, ["今の状況をもう少し詳しく教えてください。"])[0]]
 
 
 class RevelationEngine:
     def score_to_phase(self, action_score: float, risk_score: float) -> str:
         if risk_score > 0.72:
-            return "霧が濃く、無理に進むほど道を見失いやすい相"
+            return "少し無理をすると、流れが崩れやすい時です"
         elif action_score > 0.68 and risk_score < 0.45:
-            return "流れが開きやすく、意思を形にしやすい相"
+            return "流れが開きやすく、動いたことが形になりやすい時です"
         elif action_score < 0.45 and risk_score < 0.55:
-            return "大きく動くより、整えることで次が見える相"
+            return "今は大きく動くより、整えることで次が見えてくる時です"
         else:
-            return "止まっているようで、内側では静かに流れが変わる相"
+            return "止まっているように見えても、内側では流れが変わり始めています"
 
     def risk_to_warning(self, topic: str, risk_score: float, noise_score: float) -> str:
         if topic == "love":
             if noise_score > 0.7:
-                return "いまは気持ちが先走るほど、相手よりも自分の不安に引かれやすい時です。"
+                return "今は相手そのものより、不安に引っぱられて判断しやすい流れがあります。"
             if risk_score > 0.7:
-                return "答えを急ぐほど縁の輪郭が曇りやすく、追い方を間違えると傷が深くなります。"
-            return "縁は完全に閉じてはいませんが、押しすぎると流れを細らせやすい気配があります。"
+                return "答えを急ぎすぎると、縁の輪郭が見えにくくなりやすい時です。"
+            return "縁そのものは閉じていませんが、押し方を間違えると細くなりやすい気配があります。"
 
         if topic == "work":
             if risk_score > 0.7:
-                return "いまは頑張りそのものより、消耗の蓄積が判断を鈍らせる時です。"
+                return "今は頑張り不足というより、疲れの積み重なりが判断を鈍らせやすい時です。"
             if noise_score > 0.7:
-                return "本当の問題よりも疲労が大きく見せている部分があります。"
-            return "状況は固定されているようで、見え方の調整次第で出口が見え始める流れです。"
+                return "問題そのものより、今の消耗が大きく見せている部分があります。"
+            return "状況は固まっているように見えても、見方を変えると出口が見え始める流れです。"
 
         if risk_score > 0.7:
-            return "相手や環境よりも、心の摩耗が関係の受け取り方を歪めやすい時です。"
-        return "いまの関係は切断よりも、距離の調整によって輪郭が変わる可能性があります。"
+            return "相手や環境よりも、心の疲れが関係の見え方をゆがめやすい時です。"
+        return "今の関係は、切れるというより距離の取り方で形が変わる可能性があります。"
 
     def action_guidance(self, action_label: str, topic: str) -> str:
         guidance_map = {
-            "wait": "今日は答えを取りにいくより、ひとつだけ整えてから明日に渡す方が流れに合います。",
-            "move": "いまは完全な静観より、小さく意思を示す方が運の流れと噛み合います。",
-            "rest": "まず心身の摩耗を落とすことが先です。休息そのものが運の修復になります。",
-            "soft_contact": "強い言葉ではなく、やわらかな接触が今の流れには合っています。",
-            "distance": "無理な維持より、少し距離を置くことで本当の輪郭が見えやすくなります。"
+            "wait": "今日は結論を急ぐより、ひとつだけ整えてから次を見る方が流れに合っています。",
+            "move": "今は完全に止まるより、小さく動いた方が流れに噛み合いやすいです。",
+            "rest": "まず心と体の消耗を落とすことが先です。休むこと自体が流れを戻します。",
+            "soft_contact": "強く押すより、やわらかく気配を見せるくらいがちょうどいい時です。",
+            "distance": "無理に関係をつなぐより、少し距離を置くことで本当の輪郭が見えやすくなります。"
         }
-        return guidance_map.get(action_label, "いまは急がず、自分の内側を整えることが次の道をひらきます。")
+        return guidance_map.get(action_label, "今は急いで答えを取りにいくより、自分の内側を整える方が次につながります。")
 
-    def build_message(self, topic: str, scores: Dict[str, float], date_str: str) -> str:
+    def build_message(self, topic: str, scores: Dict[str, float], date_str: str, is_paid: bool = False) -> str:
         action_score = scores["action_score"]
         risk_score = scores["risk_score"]
         noise_score = scores["noise_score"]
@@ -130,31 +135,36 @@ class RevelationEngine:
 
         opening_map = {
             "love": [
-                "いまの恋の流れには、少し霧があります。",
-                "いまは恋の行方よりも、心の揺れが強く出やすい時です。",
+                "今の恋の流れには、少し霧があります。",
+                "今は恋の行方よりも、心の揺れが強く出やすい時です。",
                 "この恋は止まっているようで、内側ではまだ動いています。"
             ],
             "work": [
-                "いまの仕事の流れは、静かに形を変え始めています。",
-                "いまは結果そのものより、消耗の影が判断に混じりやすい時です。",
+                "今の仕事の流れは、静かに形を変え始めています。",
+                "今は結果そのものより、疲れの影が判断に混じりやすい時です。",
                 "仕事の流れは止まって見えても、水面下では少しずつ変わっています。"
             ],
             "relationship": [
-                "いまの縁は、切れるというより揺れている状態です。",
+                "今の縁は、切れるというより揺れている状態です。",
                 "人との流れは、押すより整えることで輪郭が見えやすくなる時です。",
-                "いまの関係には、言葉より先に気配のずれが出ています。"
+                "今の関係には、言葉より先に気配のずれが出ています。"
             ]
         }
 
-        openings = opening_map.get(topic, ["いまの流れは、静かに揺れています。"])
+        openings = opening_map.get(topic, ["今の流れは、静かに揺れています。"])
         opening = openings[0]
+
+        if is_paid:
+            tail = "見えるものだけで決めるより、まだ見えていない流れごと受け取った方が道はきれいにつながります。"
+        else:
+            tail = "無理に未来を掴みにいくより、流れの癖を見抜いた者から道は開きます。"
 
         return (
             f"{opening}\n\n"
-            f"いまのあなたは、{phase} にいます。\n"
+            f"今のあなたは、{phase}。\n"
             f"{warning}\n"
             f"{guidance}\n\n"
-            f"無理に未来を掴みにいくより、流れの癖を見抜いた者から道は開きます。"
+            f"{tail}"
         )
 
 
@@ -183,8 +193,7 @@ class OracleEngine:
             "week": 0.62,
             "month": 0.66
         }
-        time_openness = horizon_map.get(horizon, 0.55)
-        return {"time_openness": time_openness}
+        return {"time_openness": horizon_map.get(horizon, 0.55)}
 
     def symbolic_layer(self, user_profile: Dict[str, Any]) -> Dict[str, float]:
         birth_month = int(user_profile.get("birth_month", 6))
@@ -262,7 +271,7 @@ class OracleEngine:
             updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.10, 1.0)
             updated["loneliness"] = min(float(updated.get("loneliness", 0.5)) + 0.10, 1.0)
 
-        if "待ち" in text:
+        if "待ち" in text or "様子を見たい" in text:
             updated["urgency"] = max(float(updated.get("urgency", 0.5)) - 0.10, 0.0)
 
         if "動きたい" in text or "連絡したい" in text or "伝えたい" in text:
@@ -270,6 +279,9 @@ class OracleEngine:
 
         if "眠れてない" in text or "寝れてない" in text or "休めてない" in text:
             updated["sleep_deficit"] = min(float(updated.get("sleep_deficit", 0.5)) + 0.15, 1.0)
+
+        if "ずっと" in text or "前から" in text or "長く" in text:
+            updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.05, 1.0)
 
         return updated
 
@@ -282,7 +294,6 @@ class OracleEngine:
         context: Dict[str, float],
         memory: Dict[str, float]
     ) -> Dict[str, float]:
-
         resilience = identity["resilience"]
         sensitivity = identity["sensitivity"]
         patience = identity["patience"]
@@ -343,9 +354,9 @@ class OracleEngine:
         user_text: str,
         date_str: str,
         horizon: str = "today",
-        memory: Dict[str, Any] = None
+        memory: Dict[str, Any] = None,
+        is_paid: bool = False
     ) -> Dict[str, Any]:
-
         if memory is None:
             memory = {}
 
@@ -369,10 +380,11 @@ class OracleEngine:
         revelation = self.revelation_engine.build_message(
             topic=topic,
             scores=scores,
-            date_str=date_str
+            date_str=date_str,
+            is_paid=is_paid
         )
 
-        followup_questions = self.question_engine.get_followup_questions(topic)
+        followup_questions = self.question_engine.get_question_set(topic, is_paid=is_paid)
 
         self.state.samples += 1
 
