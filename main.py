@@ -70,6 +70,10 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(GEMINI_MODEL)
 
+
+# -------------------------
+# Oracle Engine 初期化
+# -------------------------
 oracle_state = EngineState()
 oracle_engine = OracleEngine(oracle_state)
 
@@ -100,29 +104,8 @@ db = firestore.client()
 
 
 # -------------------------
-# Gemini 応答生成
+# Gemini 応答生成（朝通知用）
 # -------------------------
-def generate_shiki_reply(user_text: str) -> str:
-    prompt = (
-        "あなたは神秘的な存在『識（SHIKI）』です。"
-        "孤独を否定せず、静かに寄り添い、少しだけ神秘的に答えてください。"
-        "説教はしません。"
-        "返答は1〜3文、140文字以内、日本語で自然に。"
-        "毎回できるだけ表現を変え、ユーザーの内容に一歩踏み込んでください。"
-        f"\n\nユーザーの言葉: {user_text}"
-    )
-
-    try:
-        response = model.generate_content(prompt)
-        text = getattr(response, "text", None)
-        if text and text.strip():
-            return text.strip()
-        return "その言葉は、夜の水面に静かに沈みました。――識より"
-    except Exception as e:
-        logger.error("Gemini reply error: %s", e)
-        return "その言葉は、夜の水面に静かに沈みました。――識より"
-
-
 def generate_mystical_message(user_text: str) -> str:
     prompt = (
         "あなたは神秘的な存在『識（SHIKI）』。孤独を肯定し、静かに寄り添います。"
@@ -221,7 +204,7 @@ def handle_text(event):
         user_doc = user_ref.get()
         user_data = user_doc.to_dict() or {}
 
-        # 1. まず発言を保存
+        # 1. 発言を保存
         user_ref.set(
             {
                 "last_msg": u_text,
@@ -230,13 +213,13 @@ def handle_text(event):
             merge=True
         )
 
-        # 2. もし「質問待ち状態」なら、その答えを使って神託を返す
+        # 2. pending があれば「質問への回答」とみなして神託を返す
         pending_question = user_data.get("pending_question")
         pending_topic = user_data.get("pending_topic")
         pending_context = user_data.get("pending_context")
+        pending_original_text = user_data.get("pending_original_text")
 
-        if pending_question and pending_topic and pending_context:
-            # 仮のユーザープロファイル
+        if pending_question and pending_topic and pending_context and pending_original_text:
             user_profile = {
                 "birth_month": int(user_data.get("birth_month", 6)),
                 "resilience": float(user_data.get("resilience", 0.55)),
@@ -249,17 +232,15 @@ def handle_text(event):
                 "volatility": float(user_data.get("volatility", 0.55))
             }
 
-            # 観測回答を context に反映
             updated_context = oracle_engine.apply_observation_answer(
                 context_feats=pending_context,
                 answer_text=u_text
             )
 
-            # 神託生成
             oracle_result = oracle_engine.predict(
                 user_profile=user_profile,
                 context_feats=updated_context,
-                user_text=user_data.get("pending_original_text", u_text),
+                user_text=pending_original_text,
                 date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                 horizon="today",
                 memory=memory
@@ -267,7 +248,6 @@ def handle_text(event):
 
             reply_text = oracle_result["message"]
 
-            # pending を消して、結果を保存
             user_ref.set(
                 {
                     "pending_question": firestore.DELETE_FIELD,
@@ -288,7 +268,7 @@ def handle_text(event):
             )
             return
 
-        # 3. 通常時：まずはテーマ判定して、観測質問を1つ返す
+        # 3. 通常時はまず質問を1つ返す
         detected_topic = oracle_engine.topic_classifier.classify(u_text)
 
         base_context = {
@@ -301,7 +281,6 @@ def handle_text(event):
         followup_questions = oracle_engine.question_engine.get_followup_questions(detected_topic)
         first_question = followup_questions[0]
 
-        # 質問待ち状態を保存
         user_ref.set(
             {
                 "pending_question": first_question,
@@ -313,7 +292,7 @@ def handle_text(event):
         )
 
         reply_text = (
-            f"観測をもう少しだけ深めます。\n"
+            "観測をもう少しだけ深めます。\n"
             f"{first_question}"
         )
 
