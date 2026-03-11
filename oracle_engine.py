@@ -128,15 +128,29 @@ class RevelationEngine:
         warning = self.risk_to_warning(topic, risk_score, noise_score)
         guidance = self.action_guidance(action_label, topic)
 
-        topic_name_map = {
-            "love": "恋の流れ",
-            "work": "仕事の流れ",
-            "relationship": "人との縁の流れ"
+        opening_map = {
+            "love": [
+                "いまの恋の流れには、少し霧があります。",
+                "いまは恋の行方よりも、心の揺れが強く出やすい時です。",
+                "この恋は止まっているようで、内側ではまだ動いています。"
+            ],
+            "work": [
+                "いまの仕事の流れは、静かに形を変え始めています。",
+                "いまは結果そのものより、消耗の影が判断に混じりやすい時です。",
+                "仕事の流れは止まって見えても、水面下では少しずつ変わっています。"
+            ],
+            "relationship": [
+                "いまの縁は、切れるというより揺れている状態です。",
+                "人との流れは、押すより整えることで輪郭が見えやすくなる時です。",
+                "いまの関係には、言葉より先に気配のずれが出ています。"
+            ]
         }
-        topic_name = topic_name_map.get(topic, "流れ")
+
+        openings = opening_map.get(topic, ["いまの流れは、静かに揺れています。"])
+        opening = openings[0]
 
         return (
-            f"{date_str}の{topic_name}を観測しました。\n\n"
+            f"{opening}\n\n"
             f"いまのあなたは、{phase} にいます。\n"
             f"{warning}\n"
             f"{guidance}\n\n"
