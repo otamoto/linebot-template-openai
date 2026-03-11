@@ -113,14 +113,11 @@ def normalize_text(text: str) -> str:
 
 
 def parse_japanese_era_date(text: str):
-    """
-    昭和 / 平成 / 令和 を西暦へ変換
-    """
     text = normalize_text(text)
     era_map = {
-        "昭和": 1925,  # 昭和1年 = 1926
-        "平成": 1988,  # 平成1年 = 1989
-        "令和": 2018   # 令和1年 = 2019
+        "昭和": 1925,
+        "平成": 1988,
+        "令和": 2018
     }
 
     m = re.search(r"(昭和|平成|令和)\s*(元|\d+)\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
@@ -143,26 +140,12 @@ def parse_japanese_era_date(text: str):
 
 
 def parse_birth_date(text: str):
-    """
-    幅広い生年月日入力を YYYY-MM-DD に変換する
-    受け付ける例:
-    - 1990-05-12
-    - 1990/5/12
-    - 1990年5月12日
-    - 19900512
-    - 1990512
-    - 昭和60年5月12日
-    - 平成3年11月2日
-    - 令和2年6月10日
-    """
     text = normalize_text(text)
 
-    # 和暦
     era_result = parse_japanese_era_date(text)
     if era_result:
         return era_result
 
-    # YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
     m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", text)
     if m:
         year, month, day = map(int, m.groups())
@@ -172,7 +155,6 @@ def parse_birth_date(text: str):
         except ValueError:
             return None
 
-    # YYYY年M月D日
     m = re.match(r"^(\d{4})年(\d{1,2})月(\d{1,2})日$", text)
     if m:
         year, month, day = map(int, m.groups())
@@ -182,7 +164,6 @@ def parse_birth_date(text: str):
         except ValueError:
             return None
 
-    # 8桁 YYYYMMDD
     m = re.match(r"^(\d{4})(\d{2})(\d{2})$", text)
     if m:
         year, month, day = map(int, m.groups())
@@ -192,7 +173,6 @@ def parse_birth_date(text: str):
         except ValueError:
             return None
 
-    # 7桁 YYYYMDD または YYYYMM D
     m = re.match(r"^(\d{4})(\d{1,2})(\d{1,2})$", text)
     if m:
         year = int(m.group(1))
@@ -209,6 +189,76 @@ def parse_birth_date(text: str):
 
 def looks_like_birth_date(text: str) -> bool:
     return parse_birth_date(text) is not None
+
+
+# -------------------------
+# 補助関数
+# -------------------------
+def build_user_profile(user_data: dict) -> dict:
+    user_profile = {
+        "birth_month": 6,
+        "resilience": float(user_data.get("resilience", 0.55)),
+        "sensitivity": float(user_data.get("sensitivity", 0.70)),
+        "patience": float(user_data.get("patience", 0.45))
+    }
+
+    birth_date = user_data.get("birth_date")
+    if birth_date:
+        try:
+            user_profile["birth_month"] = int(birth_date.split("-")[1])
+        except Exception:
+            pass
+
+    return user_profile
+
+
+def build_memory(user_data: dict) -> dict:
+    return {
+        "repeat_count": int(user_data.get("repeat_count", 1)),
+        "volatility": float(user_data.get("volatility", 0.55))
+    }
+
+
+def build_base_context(user_data: dict) -> dict:
+    return {
+        "stress": float(user_data.get("stress", 0.60)),
+        "sleep_deficit": float(user_data.get("sleep_deficit", 0.50)),
+        "loneliness": float(user_data.get("loneliness", 0.55)),
+        "urgency": float(user_data.get("urgency", 0.65))
+    }
+
+
+def generate_reading_from_saved_context(user_data: dict) -> str:
+    pending_original_text = user_data.get("pending_original_text") or user_data.get("last_consultation_text")
+    if not pending_original_text:
+        return "生まれた日の気配は受け取りました。次に視てほしいことを送ってください。"
+
+    current_topic = user_data.get("current_topic") or user_data.get("last_topic") or oracle_engine.topic_classifier.classify(pending_original_text)
+    is_paid = bool(user_data.get("is_paid", False))
+    horizon = "week" if is_paid else "today"
+
+    user_profile = build_user_profile(user_data)
+    memory = build_memory(user_data)
+
+    base_context = user_data.get("pending_context") or user_data.get("last_context") or build_base_context(user_data)
+    question_answers = user_data.get("question_answers", []) or user_data.get("last_question_answers", [])
+
+    updated_context = dict(base_context)
+    for ans in question_answers:
+        updated_context = oracle_engine.apply_observation_answer(updated_context, ans)
+
+    oracle_result = oracle_engine.predict(
+        user_profile=user_profile,
+        context_feats=updated_context,
+        user_text=pending_original_text,
+        date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        horizon=horizon,
+        memory=memory,
+        is_paid=is_paid
+    )
+
+    tail = "\n\n生まれた日の流れも重ねたことで、さっきより深い層まで視えるようになりました。"
+    return oracle_result["message"] + tail
 
 
 # -------------------------
@@ -312,7 +362,6 @@ def handle_text(event):
         user_doc = user_ref.get()
         user_data = user_doc.to_dict() or {}
 
-        # 発言保存
         user_ref.set(
             {
                 "last_msg": u_text,
@@ -322,7 +371,7 @@ def handle_text(event):
         )
 
         # --------------------------------
-        # 1. 生年月日入力の受け取り
+        # 1. 生年月日入力を受け取った場合
         # --------------------------------
         if looks_like_birth_date(u_text):
             parsed_birth = parse_birth_date(u_text)
@@ -334,12 +383,16 @@ def handle_text(event):
                     merge=True
                 )
 
+                # もし相談の流れが残っていれば、その内容 + 年月日で再読する
+                re_reading = generate_reading_from_saved_context({**user_data, "birth_date": parsed_birth})
+
                 line_bot_api.reply_message(
                     event.reply_token,
                     TextSendMessage(
                         text=(
-                            f"生まれた日の気配を受け取りました。\n"
-                            f"{parsed_birth} として記録しておきます。"
+                            f"生まれた日の気配を受け取りました。"
+                            f"{parsed_birth} として記録しておきます。\n\n"
+                            f"{re_reading}"
                         )
                     )
                 )
@@ -364,7 +417,6 @@ def handle_text(event):
             question_answers.append(u_text)
             question_step += 1
 
-            # まだ次の質問がある
             if question_step < len(pending_questions):
                 next_question = pending_questions[question_step]
 
@@ -382,25 +434,8 @@ def handle_text(event):
                 )
                 return
 
-            # 質問が終わったので神託生成
-            user_profile = {
-                "birth_month": 6,
-                "resilience": float(user_data.get("resilience", 0.55)),
-                "sensitivity": float(user_data.get("sensitivity", 0.70)),
-                "patience": float(user_data.get("patience", 0.45))
-            }
-
-            birth_date = user_data.get("birth_date")
-            if birth_date:
-                try:
-                    user_profile["birth_month"] = int(birth_date.split("-")[1])
-                except Exception:
-                    pass
-
-            memory = {
-                "repeat_count": int(user_data.get("repeat_count", 1)),
-                "volatility": float(user_data.get("volatility", 0.55))
-            }
+            user_profile = build_user_profile(user_data)
+            memory = build_memory(user_data)
 
             updated_context = dict(pending_context)
             for ans in question_answers:
@@ -420,14 +455,12 @@ def handle_text(event):
 
             reply_text = oracle_result["message"]
 
-            # 生年月日未登録なら自然に誘導
-            if not birth_date:
+            if not user_data.get("birth_date"):
                 reply_text += (
-                    "\n\nもっと深く流れを視るには、生まれた日の気配も重ねた方が精度が上がります。"
-                    "\n生年月日は、1990-05-12、1990年5月12日、昭和60年5月12日 のような形で送ってもらえれば大丈夫です。"
+                    "\n\nもっと深く視るには、生まれた日の流れも重ねた方が精度が上がります。"
+                    "\n生年月日は、1990-05-12、1990年5月12日、昭和60年5月12日 みたいな形で送ってもらえれば大丈夫です。"
                 )
 
-            # 状態クリア
             user_ref.set(
                 {
                     "conversation_state": "completed_reading",
@@ -439,7 +472,10 @@ def handle_text(event):
                     "pending_context": firestore.DELETE_FIELD,
                     "last_topic": oracle_result["topic"],
                     "last_oracle_message": oracle_result["message"],
-                    "oracle_engine_version": oracle_result["engine_version"]
+                    "oracle_engine_version": oracle_result["engine_version"],
+                    "last_consultation_text": pending_original_text,
+                    "last_question_answers": question_answers,
+                    "last_context": updated_context
                 },
                 merge=True
             )
@@ -454,13 +490,7 @@ def handle_text(event):
         # 4. 通常時：質問フロー開始
         # --------------------------------
         detected_topic = oracle_engine.topic_classifier.classify(u_text)
-
-        base_context = {
-            "stress": float(user_data.get("stress", 0.60)),
-            "sleep_deficit": float(user_data.get("sleep_deficit", 0.50)),
-            "loneliness": float(user_data.get("loneliness", 0.55)),
-            "urgency": float(user_data.get("urgency", 0.65))
-        }
+        base_context = build_base_context(user_data)
 
         question_set = oracle_engine.question_engine.get_question_set(
             topic=detected_topic,
@@ -477,7 +507,8 @@ def handle_text(event):
                 "question_answers": [],
                 "pending_original_text": u_text,
                 "current_topic": detected_topic,
-                "pending_context": base_context
+                "pending_context": base_context,
+                "last_consultation_text": u_text
             },
             merge=True
         )
