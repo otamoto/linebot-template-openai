@@ -140,7 +140,7 @@ class RevelationEngine:
             f"いまのあなたは、{phase} にいます。\n"
             f"{warning}\n"
             f"{guidance}\n\n"
-            f"無理に未来を掴みにいくより、流れの癖を見抜いた者から道は開きます。――識より"
+            f"無理に未来を掴みにいくより、流れの癖を見抜いた者から道は開きます。"
         )
 
 
@@ -231,6 +231,34 @@ class OracleEngine:
             "volatility": volatility
         }
 
+    def apply_observation_answer(self, context_feats: Dict[str, Any], answer_text: str) -> Dict[str, Any]:
+        updated = dict(context_feats)
+        text = answer_text.strip()
+
+        if "焦り" in text or "急い" in text or "不安" in text:
+            updated["urgency"] = min(float(updated.get("urgency", 0.5)) + 0.15, 1.0)
+
+        if "悲しい" in text or "寂しい" in text or "孤独" in text:
+            updated["loneliness"] = min(float(updated.get("loneliness", 0.5)) + 0.15, 1.0)
+
+        if "怒" in text or "イライラ" in text:
+            updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.15, 1.0)
+
+        if "空虚" in text or "虚しい" in text or "何もしたくない" in text:
+            updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.10, 1.0)
+            updated["loneliness"] = min(float(updated.get("loneliness", 0.5)) + 0.10, 1.0)
+
+        if "待ち" in text:
+            updated["urgency"] = max(float(updated.get("urgency", 0.5)) - 0.10, 0.0)
+
+        if "動きたい" in text or "連絡したい" in text or "伝えたい" in text:
+            updated["urgency"] = min(float(updated.get("urgency", 0.5)) + 0.10, 1.0)
+
+        if "眠れてない" in text or "寝れてない" in text or "休めてない" in text:
+            updated["sleep_deficit"] = min(float(updated.get("sleep_deficit", 0.5)) + 0.15, 1.0)
+
+        return updated
+
     def branch_layer(
         self,
         topic: str,
@@ -293,44 +321,6 @@ class OracleEngine:
             "noise_score": round(noise_score, 3),
             "best_action": best_action
         }
-
-    def apply_observation_answer(self, context_feats: Dict[str, Any], answer_text: str) -> Dict[str, Any]:
-    """
-    ユーザーの観測回答から、context_feats を少し補正する
-    """
-    updated = dict(context_feats)
-    text = answer_text.strip()
-
-    # 焦り
-    if "焦り" in text or "急い" in text or "不安" in text:
-        updated["urgency"] = min(float(updated.get("urgency", 0.5)) + 0.15, 1.0)
-
-    # 悲しみ / 孤独
-    if "悲しい" in text or "寂しい" in text or "孤独" in text:
-        updated["loneliness"] = min(float(updated.get("loneliness", 0.5)) + 0.15, 1.0)
-
-    # 怒り
-    if "怒" in text or "イライラ" in text:
-        updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.15, 1.0)
-
-    # 空虚 / 無気力
-    if "空虚" in text or "虚しい" in text or "何もしたくない" in text:
-        updated["stress"] = min(float(updated.get("stress", 0.5)) + 0.10, 1.0)
-        updated["loneliness"] = min(float(updated.get("loneliness", 0.5)) + 0.10, 1.0)
-
-    # 待ちたい
-    if "待ち" in text:
-        updated["urgency"] = max(float(updated.get("urgency", 0.5)) - 0.10, 0.0)
-
-    # 動きたい
-    if "動きたい" in text or "連絡したい" in text or "伝えたい" in text:
-        updated["urgency"] = min(float(updated.get("urgency", 0.5)) + 0.10, 1.0)
-
-    # 休めていない
-    if "眠れてない" in text or "寝れてない" in text or "休めてない" in text:
-        updated["sleep_deficit"] = min(float(updated.get("sleep_deficit", 0.5)) + 0.15, 1.0)
-
-    return updated
 
     def predict(
         self,
