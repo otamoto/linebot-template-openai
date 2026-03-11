@@ -15,6 +15,8 @@ import google.generativeai as genai
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+from oracle_engine import EngineState, OracleEngine
+
 
 # -------------------------
 # ログ設定
