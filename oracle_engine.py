@@ -7,7 +7,7 @@ class EngineState:
     method_weights: Dict[str, float] = field(default_factory=lambda: {
         "astrology": 1.0,
         "bazi": 1.0,
-        "kyusei": 1.0
+        "kyusei": 1.0,
     })
     layer_weights: Dict[str, float] = field(default_factory=lambda: {
         "identity": 1.0,
@@ -15,7 +15,7 @@ class EngineState:
         "symbolic": 1.15,
         "context": 1.25,
         "memory": 1.0,
-        "branch": 1.1
+        "branch": 1.1,
     })
     samples: int = 0
     backtest_score: float = 0.50
@@ -45,10 +45,8 @@ class TopicClassifier:
                 if kw in text:
                     scores[topic] += 1
 
-        best_topic = max(scores, key=scores.get)
-        if scores[best_topic] == 0:
-            return "relationship"
-        return best_topic
+        best = max(scores, key=scores.get)
+        return best if scores[best] > 0 else "relationship"
 
 
 class RevelationEngine:
@@ -99,7 +97,7 @@ class RevelationEngine:
         opening_map = {
             "love": "今の恋の流れには、少し霧があります。",
             "work": "今の仕事の流れは、静かに形を変え始めています。",
-            "relationship": "今の縁は、切れるというより揺れている状態です。"
+            "relationship": "今の縁は、切れるというより揺れている状態です。",
         }
 
         opening = opening_map.get(topic, "今の流れは、静かに揺れています。")
@@ -133,7 +131,7 @@ class OracleEngine:
         return {
             "resilience": float(user_profile.get("resilience", 0.55)),
             "sensitivity": float(user_profile.get("sensitivity", 0.70)),
-            "patience": float(user_profile.get("patience", 0.45))
+            "patience": float(user_profile.get("patience", 0.45)),
         }
 
     def temporal_layer(self, horizon: str) -> Dict[str, float]:
@@ -141,7 +139,7 @@ class OracleEngine:
             "today": 0.55,
             "3days": 0.58,
             "week": 0.64,
-            "month": 0.68
+            "month": 0.68,
         }
         return {"time_openness": horizon_map.get(horizon, 0.55)}
 
@@ -173,7 +171,7 @@ class OracleEngine:
             "astrology_flux": astrology_flux,
             "bazi_stability": bazi_stability,
             "kyusei_motion": kyusei_motion,
-            "symbolic_balance": symbolic_balance
+            "symbolic_balance": symbolic_balance,
         }
 
     def context_layer(self, context_feats: Dict[str, Any]) -> Dict[str, float]:
@@ -183,30 +181,28 @@ class OracleEngine:
         urgency = float(context_feats.get("urgency", 0.5))
 
         risk_score = (
-            stress * 0.35 +
-            sleep_deficit * 0.25 +
-            loneliness * 0.20 +
-            urgency * 0.20
+            stress * 0.35
+            + sleep_deficit * 0.25
+            + loneliness * 0.20
+            + urgency * 0.20
         ) * self.state.layer_weights["context"]
 
         risk_score = max(0.0, min(risk_score, 1.0))
-
         return {
             "risk_score": risk_score,
             "stress": stress,
             "sleep_deficit": sleep_deficit,
             "loneliness": loneliness,
-            "urgency": urgency
+            "urgency": urgency,
         }
 
     def memory_layer(self, memory: Dict[str, Any]) -> Dict[str, float]:
         repeat_count = int(memory.get("repeat_count", 1))
         volatility = float(memory.get("volatility", 0.55))
         repeat_pressure = min(repeat_count / 10.0, 1.0)
-
         return {
             "repeat_pressure": repeat_pressure,
-            "volatility": volatility
+            "volatility": volatility,
         }
 
     def branch_layer(
@@ -216,7 +212,7 @@ class OracleEngine:
         temporal: Dict[str, float],
         symbolic: Dict[str, float],
         context: Dict[str, float],
-        memory: Dict[str, float]
+        memory: Dict[str, float],
     ) -> Dict[str, float]:
         resilience = identity["resilience"]
         sensitivity = identity["sensitivity"]
@@ -229,18 +225,18 @@ class OracleEngine:
         volatility = memory["volatility"]
 
         action_score = (
-            resilience * 0.22 +
-            patience * 0.18 +
-            time_openness * 0.16 +
-            symbolic_balance * 0.22 +
-            (1.0 - risk_score) * 0.22
+            resilience * 0.22
+            + patience * 0.18
+            + time_openness * 0.16
+            + symbolic_balance * 0.22
+            + (1.0 - risk_score) * 0.22
         )
 
         noise_score = (
-            sensitivity * 0.30 +
-            urgency * 0.25 +
-            volatility * 0.25 +
-            repeat_pressure * 0.20
+            sensitivity * 0.30
+            + urgency * 0.25
+            + volatility * 0.25
+            + repeat_pressure * 0.20
         )
 
         action_score = max(0.0, min(action_score, 1.0))
@@ -265,12 +261,13 @@ class OracleEngine:
             "action_score": round(action_score, 3),
             "risk_score": round(risk_score, 3),
             "noise_score": round(noise_score, 3),
-            "best_action": best_action
+            "best_action": best_action,
         }
 
     def build_summary(self, topic: str, scores: Dict[str, float]) -> Dict[str, str]:
         action_score = scores["action_score"]
         risk_score = scores["risk_score"]
+
         phase = self.revelation_engine.score_to_phase(action_score, risk_score)
         risk_hint = self.revelation_engine.risk_to_warning(topic, risk_score, scores["noise_score"])
         action_hint = self.revelation_engine.action_guidance(scores["best_action"])
@@ -294,7 +291,7 @@ class OracleEngine:
             "action_hint": action_hint,
             "risk_hint": risk_hint,
             "oracle_metaphor": metaphor,
-            "oracle_phase": oracle_phase
+            "oracle_phase": oracle_phase,
         }
 
     def predict(
@@ -304,7 +301,7 @@ class OracleEngine:
         user_text: str,
         horizon: str = "today",
         memory: Dict[str, Any] | None = None,
-        is_paid: bool = False
+        is_paid: bool = False,
     ) -> Dict[str, Any]:
         if memory is None:
             memory = {}
@@ -323,7 +320,7 @@ class OracleEngine:
             temporal=temporal,
             symbolic=symbolic,
             context=context,
-            memory=memory_scores
+            memory=memory_scores,
         )
 
         message = self.revelation_engine.build_message(topic=topic, scores=scores, is_paid=is_paid)
@@ -336,5 +333,5 @@ class OracleEngine:
             "scores": scores,
             "message": message,
             "summary": summary,
-            "engine_version": "ORACLE-v1.5"
+            "engine_version": "ORACLE-v2.0-hybrid",
         }
