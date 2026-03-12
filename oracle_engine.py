@@ -35,7 +35,7 @@ class TopicClassifier:
             "relationship": [
                 "人間関係", "友達", "家族", "仲", "距離", "喧嘩", "孤独",
                 "苦しい", "嫌われた", "不安", "関係", "付き合い"
-            ]
+            ],
         }
 
     def classify(self, text: str) -> str:
@@ -84,7 +84,7 @@ class RevelationEngine:
             "move": "完全に止まるより、小さく動いた方が流れに噛み合いやすいです。",
             "rest": "まず心と体の消耗を落とすことが先です。休むこと自体が流れを戻します。",
             "soft_contact": "強く押すより、やわらかく気配を見せるくらいがちょうどいい時です。",
-            "distance": "無理につなぐより、少し距離を置いた方が本当の輪郭が見えやすくなります。"
+            "distance": "無理につなぐより、少し距離を置いた方が本当の輪郭が見えやすくなります。",
         }
         return mapping.get(action_label, "今は急いで答えを取りにいくより、自分の内側を整える方が次につながります。")
 
@@ -333,5 +333,5 @@ class OracleEngine:
             "scores": scores,
             "message": message,
             "summary": summary,
-            "engine_version": "ORACLE-v2.0-hybrid",
+            "engine_version": "ORACLE-v2.1-relation-aware",
         }
