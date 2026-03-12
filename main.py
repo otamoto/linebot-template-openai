@@ -5,7 +5,7 @@ import re
 import threading
 import unicodedata
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -138,11 +138,7 @@ def normalize_text(text: str) -> str:
 
 def parse_japanese_era_date(text: str) -> Optional[str]:
     text = normalize_text(text)
-    era_map = {
-        "昭和": 1925,
-        "平成": 1988,
-        "令和": 2018,
-    }
+    era_map = {"昭和": 1925, "平成": 1988, "令和": 2018}
 
     m = re.search(r"(昭和|平成|令和)\s*(元|\d+)\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
     if not m:
@@ -152,7 +148,6 @@ def parse_japanese_era_date(text: str) -> Optional[str]:
     era_year_raw = m.group(2)
     month = int(m.group(3))
     day = int(m.group(4))
-
     era_year = 1 if era_year_raw == "元" else int(era_year_raw)
     year = era_map[era_name] + era_year
 
@@ -200,20 +195,40 @@ def is_short_ambiguous_utterance(text: str) -> bool:
     return len(t) <= 8 and t in short_set
 
 
+def is_new_consult_message(text: str) -> bool:
+    t = normalize_text(text)
+    keywords = [
+        "それとは別に", "ちなみに", "別件", "他にも", "仕事のことも",
+        "家族のことも", "別の相談", "新しく", "別の話", "今度は", "次は", "改めて"
+    ]
+    return any(k in t for k in keywords)
+
+
+def is_hard_reset_message(text: str) -> bool:
+    t = normalize_text(text)
+    keywords = [
+        "最初から", "リセット", "新しく始めたい", "最初からいい", "最初からお願い",
+        "一回リセット", "やり直したい", "新しく相談したい", "仕切り直したい"
+    ]
+    return any(k in t for k in keywords)
+
+
 def is_resume_like_message(text: str) -> bool:
     t = normalize_text(text)
     keywords = ["続き", "その後", "前回", "あれから", "変化", "まだ", "やっぱり"]
     return any(k in t for k in keywords)
 
 
-def is_new_consult_message(text: str) -> bool:
+def looks_like_full_consult_message(text: str) -> bool:
     t = normalize_text(text)
-    keywords = [
-        "それとは別に", "ちなみに", "別件", "他にも", "仕事のことも",
-        "家族のことも", "別の相談", "最初から", "新しく", "別の話",
-        "今度は", "次は", "改めて"
+    if len(t) < 10:
+        return False
+    consult_markers = [
+        "迷っています", "悩んでいます", "どうしたら", "どうすれば", "つらい",
+        "苦しい", "好きな人", "仕事", "上司", "家族", "友達", "人間関係",
+        "連絡するべき", "別れるべき", "転職", "不安", "悩み"
     ]
-    return any(k in t for k in keywords)
+    return any(k in t for k in consult_markers)
 
 
 def append_consultation_text(existing: str, new_text: str, max_chars: int = 700) -> str:
@@ -339,7 +354,6 @@ def build_oracle_input_text(active_text: str, known_slots: dict) -> str:
 def json_from_text(text: str) -> Optional[dict]:
     if not text:
         return None
-
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?", "", cleaned).strip()
@@ -388,8 +402,49 @@ def gemini_json(prompt: str, fallback: dict) -> dict:
 
 
 # -------------------------
-# Gemini 補助: intent / slot
+# Gemini 補助: relation / intent / slot
 # -------------------------
+def classify_relation_to_previous_with_gemini(user_text: str, bookmark_summary: str, previous_topic: str) -> dict:
+    fallback = {
+        "relation_to_previous": "unclear",
+        "confidence": 0.40,
+        "reason_short": "fallback",
+    }
+
+    prompt = f"""
+あなたは会話の関係判定器です。JSONのみ返してください。
+
+入力:
+- previous_topic: {previous_topic}
+- bookmark_summary: {bookmark_summary}
+- user_text: {user_text}
+
+relation_to_previous は次のいずれか:
+resume
+new_consult
+ambient
+unclear
+
+判定ルール:
+- 前回の続き・変化報告・前回テーマ関連なら resume
+- 明らかに別の相談なら new_consult
+- 単なる雑談や相槌なら ambient
+- どちらとも言い切れないなら unclear
+
+JSON形式:
+{{
+  "relation_to_previous": "...",
+  "confidence": 0.0,
+  "reason_short": "..."
+}}
+""".strip()
+
+    result = gemini_json(prompt, fallback)
+    if result.get("relation_to_previous") not in {"resume", "new_consult", "ambient", "unclear"}:
+        return fallback
+    return result
+
+
 def classify_intent_with_gemini(user_text: str, mode: str, bookmark_exists: bool) -> dict:
     fallback = {
         "intent": "continue_consult" if mode == "consulting" else "ambient_response",
@@ -398,7 +453,7 @@ def classify_intent_with_gemini(user_text: str, mode: str, bookmark_exists: bool
     }
 
     prompt = f"""
-あなたは会話ルーターです。説明は不要です。JSONのみ返してください。
+あなたは会話ルーターです。JSONのみ返してください。
 
 入力:
 - mode: {mode}
@@ -439,7 +494,7 @@ JSON形式:
     if result.get("intent") not in {
         "ambient_response", "start_consult", "continue_consult", "resume_session",
         "new_consult_reset", "post_oracle_explain", "post_oracle_action",
-        "post_oracle_deepen", "disagree_oracle"
+        "post_oracle_deepen", "disagree_oracle",
     }:
         return fallback
     return result
@@ -447,7 +502,6 @@ JSON形式:
 
 def extract_slots_with_gemini(user_text: str, topic: str) -> dict:
     fallback = {}
-
     prompt = f"""
 あなたは相談文からスロット情報を抽出するJSON関数です。JSONのみ返してください。
 
@@ -578,18 +632,23 @@ def build_birthdate_quick_reply() -> QuickReply:
     return make_quick_reply(items)
 
 
+def build_relation_confirm_quick_reply() -> QuickReply:
+    items = [
+        QuickReplyButton(action=PostbackAction(label="前回の続き", data="type=relation_confirm&value=resume", display_text="前回の続き")),
+        QuickReplyButton(action=PostbackAction(label="別の相談", data="type=relation_confirm&value=new", display_text="別の相談")),
+        QuickReplyButton(action=PostbackAction(label="まだうまく言えない", data="type=relation_confirm&value=unclear", display_text="まだうまく言えない")),
+    ]
+    return make_quick_reply(items)
+
+
 def should_offer_quick_reply(user_data: dict, missing_slots: list[str]) -> bool:
     if not missing_slots:
         return False
-
-    ui_state = user_data.get("ui_state", "none")
-    if ui_state != "none":
+    if user_data.get("ui_state", "none") != "none":
         return False
-
     last_ctx = user_data.get("last_quick_reply_context") or {}
     if last_ctx.get("slot") == missing_slots[0]:
         return False
-
     return True
 
 
@@ -618,53 +677,69 @@ def route_user_message(user_text: str, user_data: dict) -> str:
     if looks_like_birth_date(user_text):
         return "birthdate_update"
 
-    # 明示的な完全リセット
-    if normalize_text(user_text) in {"最初から", "リセット", "新しく始めたい"}:
+    if is_hard_reset_message(user_text):
         return "hard_reset"
 
-    # 新相談キーワードは mode を問わず優先
     if is_new_consult_message(user_text):
         return "new_consult_reset"
 
     if mode == "suspended":
-        if user_data.get("bookmark") and is_resume_like_message(user_text):
+        bookmark = user_data.get("bookmark") or {}
+        relation = classify_relation_to_previous_with_gemini(
+            user_text=user_text,
+            bookmark_summary=bookmark.get("oracle_summary", ""),
+            previous_topic=user_data.get("last_topic", ""),
+        ).get("relation_to_previous", "unclear")
+
+        if relation == "resume":
             return "resume_session"
-        if is_short_ambiguous_utterance(user_text):
+        if relation == "new_consult":
+            return "start_consult"
+        if relation == "ambient":
             return "ambient_response"
-        return "start_consult"
+        return "confirm_relation"
 
-    # post_oracle / consulting / idle などの曖昧ケースは Gemini 補助
-    intent_result = classify_intent_with_gemini(
-        user_text=user_text,
-        mode=mode,
-        bookmark_exists=bool(user_data.get("bookmark")),
-    )
-    intent = intent_result.get("intent", "")
-
-    allowed = {
-        "ambient_response",
-        "start_consult",
-        "continue_consult",
-        "resume_session",
-        "new_consult_reset",
-        "post_oracle_explain",
-        "post_oracle_action",
-        "post_oracle_deepen",
-        "disagree_oracle",
-    }
-    if intent in allowed:
-        return intent
-
-    # 最終フォールバック
     if mode == "post_oracle":
+        # 神託後でも、明らかな新相談文は新相談へ
+        if looks_like_full_consult_message(user_text):
+            return "new_consult_reset"
+
+        intent_result = classify_intent_with_gemini(
+            user_text=user_text,
+            mode=mode,
+            bookmark_exists=bool(user_data.get("bookmark")),
+        )
+        intent = intent_result.get("intent", "")
+
+        if intent in {
+            "new_consult_reset",
+            "post_oracle_explain",
+            "post_oracle_action",
+            "post_oracle_deepen",
+            "disagree_oracle",
+        }:
+            return intent
         return "post_oracle_explain"
+
     if mode == "consulting":
+        intent_result = classify_intent_with_gemini(
+            user_text=user_text,
+            mode=mode,
+            bookmark_exists=bool(user_data.get("bookmark")),
+        )
+        intent = intent_result.get("intent", "")
+        if intent in {"continue_consult", "start_consult", "ambient_response"}:
+            return "continue_consult" if intent != "ambient_response" else "ambient_response"
         return "continue_consult"
-    return "ambient_response"
+
+    if is_short_ambiguous_utterance(user_text):
+        return "ambient_response"
+
+    return "start_consult"
 
 
 # -------------------------
-# Bookmark / Implicit Suspend
+# Bookmark / state
 # -------------------------
 def build_bookmark_payload(user_data: dict) -> dict:
     last_oracle_summary = user_data.get("last_oracle_summary") or {}
@@ -745,6 +820,7 @@ def reset_consultation_state(user_ref):
             "ui_state": "none",
             "last_quick_reply_context": firestore.DELETE_FIELD,
             "repair_pending": False,
+            "pending_relation_choice": firestore.DELETE_FIELD,
         },
         merge=True,
     )
@@ -783,10 +859,12 @@ def build_reading_reply(user_data: dict, active_text: str, known_slots: dict) ->
     base_context = user_data.get("last_context") or build_base_context(user_data)
     context_feats = slots_to_context(base_context, known_slots)
     user_profile = build_user_profile(user_data)
-    memory = build_memory(user_data)
+    memory = {
+        "repeat_count": int(user_data.get("repeat_count", 1)),
+        "volatility": float(user_data.get("volatility", 0.55)),
+    }
 
     oracle_input_text = build_oracle_input_text(active_text, known_slots)
-
     oracle_result = oracle_engine.predict(
         user_profile=user_profile,
         context_feats=context_feats,
@@ -812,7 +890,6 @@ def explain_oracle_simple(user_text: str, last_oracle_message: str, oracle_summa
         f"簡単に言うと、{oracle_summary.get('core_meaning', '今は流れを急がず見直した方がいい時期です。')}\n"
         f"{oracle_summary.get('risk_hint', '')}"
     )
-
     prompt = f"""
 {PERSONA_GUARDRAIL}
 
@@ -829,7 +906,6 @@ def explain_oracle_simple(user_text: str, last_oracle_message: str, oracle_summa
 ユーザーの聞き方:
 {user_text}
 """.strip()
-
     return gemini_text(prompt, fallback)
 
 
@@ -838,7 +914,6 @@ def explain_oracle_action(user_text: str, last_oracle_message: str, oracle_summa
         f"{oracle_summary.get('action_hint', '今は答えを急ぐより、ひとつだけ整えてから次を見る方がよさそうです。')}\n"
         f"避けるなら、{oracle_summary.get('risk_hint', '焦って決める動き')}です。"
     )
-
     prompt = f"""
 {PERSONA_GUARDRAIL}
 
@@ -856,7 +931,6 @@ def explain_oracle_action(user_text: str, last_oracle_message: str, oracle_summa
 ユーザーの聞き方:
 {user_text}
 """.strip()
-
     return gemini_text(prompt, fallback)
 
 
@@ -872,10 +946,7 @@ def ambient_response(text: str) -> str:
 
 
 def build_resume_reply(bookmark: dict) -> str:
-    return bookmark.get(
-        "resume_prompt",
-        "……再同期します。前回の流れの続きを、もう一度見ていきましょう。"
-    )
+    return bookmark.get("resume_prompt", "……再同期します。前回の流れの続きを、もう一度見ていきましょう。")
 
 
 def unresolved_slot_response(slot_name: str) -> str:
@@ -912,10 +983,10 @@ def apply_common_user_touch(user_ref, user_data: dict, last_msg: Optional[str] =
 
 
 # -------------------------
-# Main message flow
+# Main flow
 # -------------------------
 def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: str):
-    # Quick Reply を出していても、自由入力が来た時点で会話優先
+    # Quick Reply中でも自由入力が来たら会話優先
     if user_data.get("ui_state", "none") != "none":
         user_ref.set(
             {
@@ -934,6 +1005,28 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
         line_bot_api.reply_message(
             reply_token,
             TextSendMessage(text="盤面をいったん静かに戻しました。新しく視たいことを、そのまま話してください。")
+        )
+        return
+
+    if route == "confirm_relation":
+        bookmark = user_data.get("bookmark") or {}
+        user_ref.set(
+            {
+                "ui_state": "awaiting_relation_confirm",
+                "pending_relation_choice": {
+                    "incoming_text": user_text,
+                    "asked_at": now_utc().isoformat(),
+                },
+            },
+            merge=True,
+        )
+        msg = (
+            "前に観測した揺れの続きを見てもよさそうですか。"
+            "\nそれとも、今回は別の盤面として受け取りましょうか。"
+        )
+        line_bot_api.reply_message(
+            reply_token,
+            TextSendMessage(text=msg, quick_reply=build_relation_confirm_quick_reply())
         )
         return
 
@@ -994,7 +1087,7 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
     if route == "new_consult_reset":
         user_ref.set(
             {
-                "conversation_mode": "consulting",
+                "conversation_mode": "idle",
                 "current_topic": firestore.DELETE_FIELD,
                 "active_consultation_text": firestore.DELETE_FIELD,
                 "known_slots": {},
@@ -1003,21 +1096,30 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                 "ui_state": "none",
                 "last_quick_reply_context": firestore.DELETE_FIELD,
                 "repair_pending": False,
+                "pending_relation_choice": firestore.DELETE_FIELD,
             },
             merge=True,
         )
-        user_data = {
-            **user_data,
-            "conversation_mode": "consulting",
-            "current_topic": None,
-            "active_consultation_text": None,
-            "known_slots": {},
-            "missing_slots": [],
-            "last_question": None,
-            "ui_state": "none",
-            "repair_pending": False,
-        }
-        route = "start_consult"
+
+        if looks_like_full_consult_message(user_text):
+            user_data = {
+                **user_data,
+                "conversation_mode": "idle",
+                "current_topic": None,
+                "active_consultation_text": None,
+                "known_slots": {},
+                "missing_slots": [],
+                "last_question": None,
+                "ui_state": "none",
+                "repair_pending": False,
+            }
+            route = "start_consult"
+        else:
+            line_bot_api.reply_message(
+                reply_token,
+                TextSendMessage(text="盤面を切り替えました。新しく視たいことを、そのまま話してください。")
+            )
+            return
 
     if route == "ambient_response":
         line_bot_api.reply_message(reply_token, TextSendMessage(text=ambient_response(user_text)))
@@ -1197,9 +1299,8 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
 
     if route == "continue_consult":
         current_topic = user_data.get("current_topic")
-        new_topic_guess = oracle_engine.topic_classifier.classify(user_text)
         if not current_topic:
-            current_topic = new_topic_guess
+            current_topic = oracle_engine.topic_classifier.classify(user_text)
 
         prev_active = user_data.get("active_consultation_text") or user_data.get("last_consultation_text") or ""
         active_text = append_consultation_text(prev_active, user_text)
@@ -1297,7 +1398,7 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
 
 
 # -------------------------
-# Postback
+# Postback flow
 # -------------------------
 def parse_postback_data(data: str) -> dict:
     result = {}
@@ -1321,6 +1422,47 @@ def apply_quick_reply_selection(user_data: dict, payload: dict) -> dict:
 
 def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: PostbackEvent):
     data = parse_postback_data(event.postback.data)
+
+    if data.get("type") == "relation_confirm":
+        choice = data.get("value")
+        pending = user_data.get("pending_relation_choice") or {}
+        incoming_text = pending.get("incoming_text", "")
+
+        user_ref.set(
+            {
+                "ui_state": "none",
+                "pending_relation_choice": firestore.DELETE_FIELD,
+            },
+            merge=True,
+        )
+
+        if choice == "resume":
+            bookmark = user_data.get("bookmark") or {}
+            user_ref.set({"conversation_mode": "consulting"}, merge=True)
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=build_resume_reply(bookmark)))
+            return
+
+        if choice == "new":
+            reset_consultation_state(user_ref)
+            if incoming_text and looks_like_full_consult_message(incoming_text):
+                refreshed = {
+                    **user_data,
+                    "conversation_mode": "idle",
+                    "current_topic": None,
+                    "known_slots": {},
+                    "ui_state": "none",
+                }
+                handle_message_flow(reply_token, user_ref, refreshed, incoming_text)
+                return
+
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="わかりました。では今回は別の盤面として受け取ります。新しく視たいことを、そのまま話してください。"))
+            return
+
+        line_bot_api.reply_message(
+            reply_token,
+            TextSendMessage(text="無理に分けなくても大丈夫です。いま気になっていることを、そのまま少しだけ言葉にしてみてください。")
+        )
+        return
 
     if data.get("type") == "birthdate_picker":
         params = getattr(event.postback, "params", None) or {}
@@ -1559,10 +1701,10 @@ def handle_text_message(event: MessageEvent):
 
         user_ref, user_data = get_or_create_user(u_id)
 
-        # 前回 last_active を使って暗黙終了判定
+        # 前回 last_active ベースで暗黙終了判定
         user_data = implicit_suspend_check(user_ref, user_data)
 
-        # その後 touch
+        # touch
         user_data = apply_common_user_touch(user_ref, user_data, last_msg=user_text)
 
         fire_and_forget(update_listener_snapshot_async, user_ref, user_text)
