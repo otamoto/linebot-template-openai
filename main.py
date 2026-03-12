@@ -5,7 +5,7 @@ import re
 import threading
 import unicodedata
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -122,6 +122,8 @@ PERSONA_GUARDRAIL = """
 - 直前の神託文をそのまま繰り返さない
 - 一般的なカウンセラーやコンサルタントのような話し方に寄りすぎない
 - 短く自然に、しかし識らしい静かな距離感を保つ
+- 会話修復が必要なときは、情報収集より違和感の受け止めを優先する
+- 相槌には重く返しすぎない
 """.strip()
 
 
@@ -132,8 +134,22 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Firestore互換のため UTC aware datetime を基本にする
+
+def ensure_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(value))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
 def normalize_text(text: str) -> str:
-    return unicodedata.normalize("NFKC", text.strip())
+    return unicodedata.normalize("NFKC", (text or "").strip())
 
 
 def parse_japanese_era_date(text: str) -> Optional[str]:
@@ -190,7 +206,8 @@ def is_short_ambiguous_utterance(text: str) -> bool:
     t = normalize_text(text)
     short_set = {
         "ん？", "え？", "えっと", "うーん", "なるほど", "そうなんだ",
-        "そうか", "ふむ", "んー", "うーむ", "へえ", "ほう", "はい", "うん"
+        "そうか", "ふむ", "んー", "うーむ", "へえ", "ほう", "はい", "うん",
+        "わかった", "ありがとう"
     }
     return len(t) <= 8 and t in short_set
 
@@ -443,55 +460,100 @@ JSON形式:
 
 def classify_turn_with_gemini(user_text: str, mode: str, bookmark_exists: bool) -> dict:
     fallback = {
-        "intent": "continue_consult" if mode == "consulting" else "ambient_response",
+        "turn_zone": "consultation" if mode == "consulting" else "post_oracle" if mode == "post_oracle" else "unknown",
+        "intent": "continue_consult" if mode == "consulting" else "ambient_response" if mode == "post_oracle" else "unknown",
         "confidence": 0.40,
+        "contains_new_consult_content": False,
+        "contains_question": False,
+        "contains_process_discomfort": False,
+        "should_avoid_quick_reply": False,
         "reason_short": "fallback",
     }
 
     prompt = f"""
-あなたは会話ルーターです。JSONのみ返してください。
+あなたはLINE Bot『識（SHIKI）』の会話機能分類器です。
+あなたは返答を作りません。JSONのみ返してください。
 
 入力:
 - mode: {mode}
 - bookmark_exists: {str(bookmark_exists).lower()}
 - user_text: {user_text}
 
-intent は次のいずれか1つ:
-ambient_response
-start_consult
-continue_consult
-resume_session
-new_consult_reset
-clarify_oracle
-ask_action
-deepen_topic
-disagree_oracle
-challenge_bot
-clarify_process
+まず turn_zone を次から1つ選んでください:
+- session_control
+- process_repair
+- post_oracle
+- consultation
+- unknown
 
-意味:
-- clarify_oracle: 神託や前の説明の意味確認
-- ask_action: どう動けばいいか
-- deepen_topic: もっと詳しく見てほしい
-- disagree_oracle: 神託や解釈へのズレ
-- challenge_bot: Botの発言や在り方への違和感、ツッコミ、不信
-- clarify_process: 進め方や質問の仕方への疑問
+次に intent を次から1つ選んでください:
+- hard_reset
+- resume_session
+- start_consult
+- continue_consult
+- new_consult_reset
+- clarify_oracle
+- ask_action
+- deepen_topic
+- disagree_oracle
+- challenge_bot
+- clarify_process
+- ambient_response
+- unknown
+
+意味の基準:
+- challenge_bot: Botそのものへの違和感、不信、テンプレ感、会話になっていない等
+- clarify_process: 進め方や質問意図への確認。「これだけで見えるの？」「今なにを聞いてるの？」等
+- clarify_oracle: 直前の神託や説明の意味確認
+- ask_action: どう動くか、何を避けるか、何をするとよいか
+- deepen_topic: もっと深く見てほしい、別角度でさらに見てほしい
+- disagree_oracle: 神託内容とのズレ、解釈違い
+- ambient_response: 相槌、受け取り、短い返答。情報追加も質問もほぼない
+- continue_consult: 状況説明・追加情報・相談本文の継続
+- start_consult: 新しく相談が始まる本文
+
+重要ルール:
+- Botや進め方への違和感は consultation にしない
+- 神託後の短い相槌は ambient_response にする
+- 「はい」「なるほど」「わかった」「そうか」は ambient_response が有力
+- 情報不足だからといって continue_consult に寄せすぎない
+- 曖昧なら unknown を返してよい
+- process_repair と ambient_response のときは should_avoid_quick_reply を true にしやすい
+- 神託の意味を尋ねているなら clarify_oracle
+- 行動を尋ねているなら ask_action
+- 相談本文・具体事情・近況追加なら consultation
 
 JSON形式:
 {{
+  "turn_zone": "...",
   "intent": "...",
   "confidence": 0.0,
+  "contains_new_consult_content": true,
+  "contains_question": false,
+  "contains_process_discomfort": false,
+  "should_avoid_quick_reply": false,
   "reason_short": "..."
 }}
 """.strip()
 
     result = gemini_json(prompt, fallback)
-    if result.get("intent") not in {
-        "ambient_response", "start_consult", "continue_consult", "resume_session",
-        "new_consult_reset", "clarify_oracle", "ask_action", "deepen_topic",
-        "disagree_oracle", "challenge_bot", "clarify_process",
-    }:
-        return fallback
+
+    valid_turn_zones = {"session_control", "process_repair", "post_oracle", "consultation", "unknown"}
+    valid_intents = {
+        "hard_reset", "resume_session", "start_consult", "continue_consult", "new_consult_reset",
+        "clarify_oracle", "ask_action", "deepen_topic", "disagree_oracle",
+        "challenge_bot", "clarify_process", "ambient_response", "unknown"
+    }
+
+    if result.get("turn_zone") not in valid_turn_zones:
+        result["turn_zone"] = fallback["turn_zone"]
+    if result.get("intent") not in valid_intents:
+        result["intent"] = fallback["intent"]
+
+    result["contains_new_consult_content"] = bool(result.get("contains_new_consult_content", False))
+    result["contains_question"] = bool(result.get("contains_question", False))
+    result["contains_process_discomfort"] = bool(result.get("contains_process_discomfort", False))
+    result["should_avoid_quick_reply"] = bool(result.get("should_avoid_quick_reply", False))
     return result
 
 
@@ -630,15 +692,42 @@ def build_relation_confirm_quick_reply() -> QuickReply:
     return make_quick_reply(items)
 
 
-def should_offer_quick_reply(user_data: dict, missing_slots: list) -> bool:
+def should_offer_quick_reply(user_data: dict, missing_slots: list, turn_meta: Optional[dict] = None) -> bool:
     if not missing_slots:
         return False
     if user_data.get("ui_state", "none") != "none":
         return False
 
+    turn_meta = turn_meta or {}
+    if turn_meta.get("should_avoid_quick_reply"):
+        return False
+
+    if turn_meta.get("turn_zone") in {"process_repair", "post_oracle"}:
+        return False
+
+    if turn_meta.get("intent") in {
+        "ambient_response",
+        "challenge_bot",
+        "clarify_process",
+        "clarify_oracle",
+        "ask_action",
+        "deepen_topic",
+        "disagree_oracle",
+        "unknown",
+    }:
+        return False
+
     last_ctx = user_data.get("last_quick_reply_context") or {}
     if last_ctx.get("slot") == missing_slots[0]:
         return False
+
+    recent_qr_count = int(user_data.get("recent_quick_reply_count", 0))
+    if recent_qr_count >= 1:
+        return False
+
+    if user_data.get("last_user_ignored_quick_reply", False):
+        return False
+
     return True
 
 
@@ -656,6 +745,73 @@ def build_slot_prompt(slot_name: str, topic: str) -> str:
 
 def ui_state_name_for_slot(slot_name: str) -> str:
     return f"awaiting_{slot_name}"
+
+
+# -------------------------
+# 文体バリエーション / 定型文抑制
+# -------------------------
+RESPONSE_VARIANTS = {
+    "consult_intro": [
+        "まだ断定の段階ではありません。先に揺れの濃いところだけ拾わせてください。",
+        "いまは結論より、濃く動いている部分だけを拾います。",
+        "まずは盤面の濃い部分を静かに見ていきます。",
+    ],
+    "reading_bridge": [
+        "今の揺れ方はある程度見えてきました。では、この流れを言葉にします。",
+        "輪郭が少し見えてきました。今の流れをそのまま言葉にします。",
+        "いま見えている流れを、静かに言葉へ移します。",
+    ],
+    "continue_prompt": [
+        "もう少しだけ、そのまま話してください。",
+        "続けられそうなら、もう少しだけ聞かせてください。",
+        "あと少しだけ、いま引っかかっているところを話してみてください。",
+    ],
+    "deepen_intro": [
+        "では、さっきの流れをもう少し深く見ます。",
+        "では、この揺れの奥を少しだけ見ていきます。",
+        "では、今の流れをもう一段だけ深く辿ります。",
+    ],
+}
+
+
+def choose_variant(key: str, user_data: dict) -> str:
+    options = RESPONSE_VARIANTS.get(key, ["そのまま続けてください。"])
+    last_key = user_data.get("last_response_variant_key")
+    last_index = int(user_data.get("last_response_variant_index", -1))
+
+    if key == last_key and len(options) > 1:
+        next_index = (last_index + 1) % len(options)
+    else:
+        next_index = 0
+    return options[next_index]
+
+
+def save_variant_state(user_ref, key: str, user_data: dict):
+    options = RESPONSE_VARIANTS.get(key, [""])
+    last_key = user_data.get("last_response_variant_key")
+    last_index = int(user_data.get("last_response_variant_index", -1))
+
+    if key == last_key and len(options) > 1:
+        next_index = (last_index + 1) % len(options)
+    else:
+        next_index = 0
+
+    user_ref.set(
+        {
+            "last_response_variant_key": key,
+            "last_response_variant_index": next_index,
+        },
+        merge=True,
+    )
+
+
+def remember_sent_phrase(user_ref, user_data: dict, text: str):
+    phrases = list(user_data.get("recent_sent_phrases") or [])
+    head = (text or "").strip().split("\n")[0][:60]
+    if head:
+        phrases.append(head)
+    phrases = phrases[-5:]
+    user_ref.set({"recent_sent_phrases": phrases}, merge=True)
 
 
 # -------------------------
@@ -691,25 +847,14 @@ def build_bookmark_payload(user_data: dict) -> dict:
 
 def implicit_suspend_check(user_ref, user_data: dict) -> dict:
     mode = user_data.get("conversation_mode", "idle")
-    if mode not in {"consulting", "post_oracle"}:
+    if mode not in {"consulting", "post_oracle", "repairing"}:
         return user_data
 
-    last_active = user_data.get("last_active")
+    last_active = ensure_datetime(user_data.get("last_active"))
     if not last_active:
         return user_data
 
-    try:
-        if hasattr(last_active, "replace"):
-            last_dt = last_active
-        else:
-            last_dt = datetime.fromisoformat(str(last_active))
-    except Exception:
-        return user_data
-
-    if last_dt.tzinfo is None:
-        last_dt = last_dt.replace(tzinfo=timezone.utc)
-
-    if now_utc() - last_dt < timedelta(hours=24):
+    if now_utc() - last_active < timedelta(hours=24):
         return user_data
 
     bookmark = user_data.get("bookmark")
@@ -740,6 +885,8 @@ def reset_consultation_state(user_ref):
             "ui_state": "none",
             "repair_pending": False,
             "pending_relation_choice": firestore.DELETE_FIELD,
+            "recent_quick_reply_count": 0,
+            "last_user_ignored_quick_reply": False,
         },
         merge=True,
     )
@@ -764,6 +911,21 @@ def apply_common_user_touch(user_ref, user_data: dict, last_msg: Optional[str] =
     merged = dict(user_data)
     merged.update(patch)
     return merged
+
+
+def set_mode(user_ref, user_data: dict, mode: str):
+    user_ref.set({"conversation_mode": mode}, merge=True)
+    user_data["conversation_mode"] = mode
+
+
+def bump_quick_reply_counter(user_ref, user_data: dict, value: int):
+    user_ref.set({"recent_quick_reply_count": value}, merge=True)
+    user_data["recent_quick_reply_count"] = value
+
+
+def mark_ignored_quick_reply(user_ref, user_data: dict, ignored: bool):
+    user_ref.set({"last_user_ignored_quick_reply": ignored}, merge=True)
+    user_data["last_user_ignored_quick_reply"] = ignored
 
 
 # -------------------------
@@ -875,8 +1037,11 @@ def explain_oracle_action(user_text: str, last_oracle_message: str, oracle_summa
     return gemini_text(prompt, fallback)
 
 
-def respond_to_process_challenge(user_text: str) -> str:
-    fallback = "そう感じたのはもっともです。まだ輪郭が見えたというより、入口に触れた程度です。急ぎすぎたなら少し戻して、あなたの言葉から丁寧に拾い直します。"
+def respond_to_process_challenge(user_text: str, route: str = "clarify_process") -> str:
+    if route == "challenge_bot":
+        fallback = "そう感じたのはもっともです。まだ輪郭が見えたというより、入口に触れた程度です。急ぎすぎたなら少し戻して、あなたの言葉から丁寧に拾い直します。"
+    else:
+        fallback = "いまは答えを決めるというより、揺れている場所を確かめている段階です。急ぎすぎるように見えたなら少し戻します。必要なら、今どこを見ているかも短く言葉にします。"
 
     prompt = f"""
 {PERSONA_GUARDRAIL}
@@ -885,6 +1050,7 @@ def respond_to_process_challenge(user_text: str) -> str:
 防御的にならず、自然に認め、進め方を少し整えてください。
 2〜4文で返してください。
 このターンでは質問攻めにしないでください。
+route: {route}
 
 ユーザー発話:
 {user_text}
@@ -899,11 +1065,25 @@ def handle_disagreement_repair() -> str:
 
 def ambient_response(text: str) -> str:
     t = normalize_text(text)
-    if t in {"ん？", "え？", "うーん", "えっと"}:
-        return "急がなくて大丈夫です。そのまま、引っかかっているところを少しだけ言葉にしてみてください。"
-    if t in {"はい", "うん", "なるほど", "そうなんだ", "そうか"}:
-        return "受け取りました。そこからもう少し見たいなら続けてもいいですし、別の角度に切り替えても大丈夫です。"
-    return "そのまま話してください。必要なところだけ、こちらで拾っていきます。"
+
+    if t in {"はい", "うん", "なるほど", "そうなんだ", "そうか", "わかった", "ありがとう"}:
+        variants = [
+            "うん、その受け取り方で大丈夫です。",
+            "それだけ受け取れたなら、今は十分です。",
+            "いまは、その感触だけ置いておけば大丈夫です。",
+            "また続きを見たくなったら、その時に聞かせてください。",
+        ]
+        return variants[hash(t) % len(variants)]
+
+    if t in {"ん？", "え？", "うーん", "えっと", "ふむ", "へえ", "ほう"}:
+        variants = [
+            "急がなくて大丈夫です。",
+            "まだ言葉にならなくても大丈夫です。",
+            "引っかかるところだけでも十分です。",
+        ]
+        return variants[hash(t) % len(variants)]
+
+    return "そのまま話して大丈夫です。必要なところだけ拾います。"
 
 
 def build_resume_reply(bookmark: dict) -> str:
@@ -922,17 +1102,25 @@ def unresolved_slot_response(slot_name: str) -> str:
 # -------------------------
 # ルーティング
 # -------------------------
-def route_user_message(user_text: str, user_data: dict) -> str:
+def route_user_message(user_text: str, user_data: dict) -> Tuple[str, dict]:
     mode = user_data.get("conversation_mode", "idle")
 
+    fallback_turn = {
+        "turn_zone": "unknown",
+        "intent": "unknown",
+        "confidence": 0.0,
+        "contains_new_consult_content": False,
+        "contains_question": False,
+        "contains_process_discomfort": False,
+        "should_avoid_quick_reply": False,
+        "reason_short": "local_fallback",
+    }
+
     if looks_like_birth_date(user_text):
-        return "birthdate_update"
+        return "birthdate_update", fallback_turn
 
     if is_hard_reset_message(user_text):
-        return "hard_reset"
-
-    if is_new_consult_message(user_text):
-        return "new_consult_reset"
+        return "hard_reset", fallback_turn
 
     if mode == "suspended":
         bookmark = user_data.get("bookmark") or {}
@@ -943,71 +1131,108 @@ def route_user_message(user_text: str, user_data: dict) -> str:
         ).get("relation_to_previous", "unclear")
 
         if relation == "resume":
-            return "resume_session"
+            return "resume_session", fallback_turn
         if relation == "new_consult":
-            return "start_consult"
+            return "start_consult", fallback_turn
         if relation == "ambient":
-            return "ambient_response"
-        return "confirm_relation"
+            return "ambient_response", fallback_turn
+        return "confirm_relation", fallback_turn
 
     turn = classify_turn_with_gemini(
         user_text=user_text,
         mode=mode,
         bookmark_exists=bool(user_data.get("bookmark")),
     )
-    intent = turn.get("intent", "")
+    intent = turn.get("intent", "unknown")
+    zone = turn.get("turn_zone", "unknown")
+    has_new_consult = turn.get("contains_new_consult_content", False)
+
+    if zone == "process_repair" or intent in {"challenge_bot", "clarify_process"}:
+        return (intent if intent in {"challenge_bot", "clarify_process"} else "clarify_process"), turn
+
+    if is_new_consult_message(user_text):
+        return "new_consult_reset", turn
 
     if mode == "post_oracle":
-        if looks_like_full_consult_message(user_text):
-            return "new_consult_reset"
-
         if intent in {
-            "new_consult_reset",
             "clarify_oracle",
             "ask_action",
             "deepen_topic",
             "disagree_oracle",
             "ambient_response",
-            "continue_consult",
-            "challenge_bot",
-            "clarify_process",
         }:
-            return intent
-        return "ambient_response"
+            return intent, turn
 
-    if mode == "consulting":
-        if intent in {"challenge_bot", "clarify_process"}:
-            return intent
+        if has_new_consult and intent in {"continue_consult", "start_consult"}:
+            return "continue_consult", turn
+
+        if looks_like_full_consult_message(user_text) and has_new_consult:
+            return "continue_consult", turn
+
+        return "ambient_response", turn
+
+    if mode in {"consulting", "repairing"}:
+        if intent in {"clarify_oracle", "ask_action"}:
+            return intent, turn
         if intent in {"continue_consult", "start_consult"}:
-            return "continue_consult"
+            return "continue_consult", turn
         if intent == "ambient_response":
-            return "ambient_response"
-        return "continue_consult"
+            return "ambient_response", turn
+        if intent == "deepen_topic":
+            return "continue_consult", turn
+        return "continue_consult", turn
 
     if is_short_ambiguous_utterance(user_text):
-        return "ambient_response"
+        return "ambient_response", turn
 
-    return "start_consult"
+    if is_resume_like_message(user_text) and user_data.get("bookmark"):
+        return "confirm_relation", turn
+
+    if intent in {"start_consult", "continue_consult"}:
+        return "start_consult", turn
+
+    return "start_consult", turn
+
+
+# -------------------------
+# 返信ユーティリティ
+# -------------------------
+def reply_text(reply_token: str, text: str, quick_reply: Optional[QuickReply] = None):
+    line_bot_api.reply_message(reply_token, TextSendMessage(text=text, quick_reply=quick_reply))
+
+
+def reply_and_remember(reply_token: str, user_ref, user_data: dict, text: str, quick_reply: Optional[QuickReply] = None):
+    reply_text(reply_token, text, quick_reply=quick_reply)
+    remember_sent_phrase(user_ref, user_data, text)
 
 
 # -------------------------
 # Message flow
 # -------------------------
 def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: str):
-    # Quick Reply中に自由入力が来たら ui_state だけ外す
+    # Quick Reply 中に自由入力が来たら ui_state は外し、無視した履歴を残す
     if user_data.get("ui_state", "none") != "none":
-        user_ref.set({"ui_state": "none"}, merge=True)
+        user_ref.set(
+            {
+                "ui_state": "none",
+                "last_user_ignored_quick_reply": True,
+                "recent_quick_reply_count": 0,
+            },
+            merge=True,
+        )
         user_data["ui_state"] = "none"
+        user_data["last_user_ignored_quick_reply"] = True
+        user_data["recent_quick_reply_count"] = 0
+    else:
+        mark_ignored_quick_reply(user_ref, user_data, False)
 
-    route = route_user_message(user_text, user_data)
+    route, turn_meta = route_user_message(user_text, user_data)
     mode = user_data.get("conversation_mode", "idle")
 
     if route == "hard_reset":
         reset_consultation_state(user_ref)
-        line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text="盤面をいったん静かに戻しました。新しく視たいことを、そのまま話してください。")
-        )
+        msg = "盤面をいったん静かに戻しました。新しく視たいことを、そのまま話してください。"
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
     if route == "confirm_relation":
@@ -1018,6 +1243,7 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                     "incoming_text": user_text,
                     "asked_at": now_utc().isoformat(),
                 },
+                "recent_quick_reply_count": 1,
             },
             merge=True,
         )
@@ -1025,22 +1251,17 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
             "前に観測した揺れの続きを見てもよさそうですか。"
             "\nそれとも、今回は別の盤面として受け取りましょうか。"
         )
-        line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text=msg, quick_reply=build_relation_confirm_quick_reply())
-        )
+        reply_and_remember(reply_token, user_ref, user_data, msg, quick_reply=build_relation_confirm_quick_reply())
         return
 
     if route == "birthdate_update":
         parsed_birth = parse_birth_date(user_text)
         if not parsed_birth:
-            line_bot_api.reply_message(
-                reply_token,
-                TextSendMessage(text="その日付はまだうまく読み取れませんでした。西暦や和暦の形で、もう一度送ってみてください。")
-            )
+            msg = "その日付はまだうまく読み取れませんでした。西暦や和暦の形で、もう一度送ってみてください。"
+            reply_and_remember(reply_token, user_ref, user_data, msg)
             return
 
-        user_ref.set({"birth_date": parsed_birth}, merge=True)
+        user_ref.set({"birth_date": parsed_birth, "ui_state": "none"}, merge=True)
 
         active_text = user_data.get("active_consultation_text") or user_data.get("last_consultation_text")
         current_topic = user_data.get("current_topic") or user_data.get("last_topic")
@@ -1048,7 +1269,7 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
 
         if active_text and current_topic:
             refreshed_user_data = {**user_data, "birth_date": parsed_birth}
-            reply_text, oracle_result, context_feats = build_reading_reply(
+            reply_body, oracle_result, context_feats = build_reading_reply(
                 user_data=refreshed_user_data,
                 active_text=active_text,
                 known_slots=known_slots,
@@ -1059,30 +1280,26 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                     "last_oracle_summary": oracle_result["summary"],
                     "last_context": context_feats,
                     "conversation_mode": "post_oracle",
+                    "recent_quick_reply_count": 0,
                 },
                 merge=True,
             )
-            line_bot_api.reply_message(
-                reply_token,
-                TextSendMessage(
-                    text=(
-                        f"生まれた日の気配を受け取りました。{parsed_birth} として記録しておきます。\n\n"
-                        f"さっきの流れを、その巡りも重ねてもう一度視ました。\n{reply_text}"
-                    )
-                ),
+            msg = (
+                f"生まれた日の気配を受け取りました。{parsed_birth} として記録しておきます。\n\n"
+                f"さっきの流れを、その巡りも重ねてもう一度視ました。\n{reply_body}"
             )
+            reply_and_remember(reply_token, user_ref, user_data, msg)
             return
 
-        line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text=f"生まれた日の気配を受け取りました。{parsed_birth} として記録しておきます。")
-        )
+        msg = f"生まれた日の気配を受け取りました。{parsed_birth} として記録しておきます。"
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
     if route == "resume_session":
         bookmark = user_data.get("bookmark") or {}
-        user_ref.set({"conversation_mode": "consulting", "ui_state": "none"}, merge=True)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=build_resume_reply(bookmark)))
+        user_ref.set({"conversation_mode": "consulting", "ui_state": "none", "recent_quick_reply_count": 0}, merge=True)
+        msg = build_resume_reply(bookmark)
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
     if route == "new_consult_reset":
@@ -1097,6 +1314,8 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                 "ui_state": "none",
                 "repair_pending": False,
                 "pending_relation_choice": firestore.DELETE_FIELD,
+                "recent_quick_reply_count": 0,
+                "last_user_ignored_quick_reply": False,
             },
             merge=True,
         )
@@ -1112,35 +1331,48 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                 "last_question": None,
                 "ui_state": "none",
                 "repair_pending": False,
+                "recent_quick_reply_count": 0,
+                "last_user_ignored_quick_reply": False,
             }
             route = "start_consult"
         else:
-            line_bot_api.reply_message(
-                reply_token,
-                TextSendMessage(text="盤面を切り替えました。新しく視たいことを、そのまま話してください。")
-            )
+            msg = "盤面を切り替えました。新しく視たいことを、そのまま話してください。"
+            reply_and_remember(reply_token, user_ref, user_data, msg)
             return
 
     if route in {"challenge_bot", "clarify_process"}:
-        reply = respond_to_process_challenge(user_text)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply))
+        reply_body = respond_to_process_challenge(user_text, route=route)
+        user_ref.set(
+            {
+                "conversation_mode": "repairing",
+                "repair_pending": False,
+                "ui_state": "none",
+                "recent_quick_reply_count": 0,
+            },
+            merge=True,
+        )
+        reply_and_remember(reply_token, user_ref, user_data, reply_body)
         return
 
     if route == "ambient_response":
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=ambient_response(user_text)))
+        msg = ambient_response(user_text)
+        user_ref.set({"recent_quick_reply_count": 0}, merge=True)
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
     last_oracle_message = user_data.get("last_oracle_message", "")
     last_oracle_summary = user_data.get("last_oracle_summary") or {}
 
     if route == "clarify_oracle":
-        reply_text = explain_oracle_simple(user_text, last_oracle_message, last_oracle_summary)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text))
+        reply_body = explain_oracle_simple(user_text, last_oracle_message, last_oracle_summary)
+        user_ref.set({"recent_quick_reply_count": 0}, merge=True)
+        reply_and_remember(reply_token, user_ref, user_data, reply_body)
         return
 
     if route == "ask_action":
-        reply_text = explain_oracle_action(user_text, last_oracle_message, last_oracle_summary)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text))
+        reply_body = explain_oracle_action(user_text, last_oracle_message, last_oracle_summary)
+        user_ref.set({"recent_quick_reply_count": 0}, merge=True)
+        reply_and_remember(reply_token, user_ref, user_data, reply_body)
         return
 
     if route == "deepen_topic":
@@ -1149,10 +1381,12 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
         needed = required_slots_for_topic(current_topic, user_data.get("plan_tier", "free"))
         missing = [s for s in needed if not known_slots.get(s)]
 
-        if missing and should_offer_quick_reply(user_data, missing):
+        if missing and should_offer_quick_reply(user_data, missing, turn_meta=turn_meta):
             slot = missing[0]
             qr = build_quick_reply_for_slot(slot, current_topic)
             prompt = build_slot_prompt(slot, current_topic)
+            intro = choose_variant("deepen_intro", user_data)
+            save_variant_state(user_ref, "deepen_intro", user_data)
             user_ref.set(
                 {
                     "conversation_mode": "consulting",
@@ -1163,26 +1397,28 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                         "topic": current_topic,
                         "asked_at": now_utc().isoformat(),
                     },
+                    "recent_quick_reply_count": 1,
                 },
                 merge=True,
             )
-            line_bot_api.reply_message(
-                reply_token,
-                TextSendMessage(text=f"では、さっきの流れをもう少し深く見ます。\n{prompt}", quick_reply=qr),
-            )
+            reply_and_remember(reply_token, user_ref, user_data, f"{intro}\n{prompt}", quick_reply=qr)
             return
 
-        next_question = "もう少しだけ、いま一番引っかかっている部分をそのまま話してみてください。"
-        user_ref.set({"conversation_mode": "consulting", "last_question": next_question, "ui_state": "none"}, merge=True)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=f"では、さっきの流れをもう少し深く見ます。\n{next_question}"))
+        next_question = choose_variant("continue_prompt", user_data)
+        save_variant_state(user_ref, "continue_prompt", user_data)
+        intro = choose_variant("deepen_intro", user_data)
+        save_variant_state(user_ref, "deepen_intro", user_data)
+        user_ref.set({"conversation_mode": "consulting", "last_question": next_question, "ui_state": "none", "recent_quick_reply_count": 0}, merge=True)
+        reply_and_remember(reply_token, user_ref, user_data, f"{intro}\n{next_question}")
         return
 
     if route == "disagree_oracle":
-        user_ref.set({"conversation_mode": "post_oracle", "repair_pending": True}, merge=True)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=handle_disagreement_repair()))
+        user_ref.set({"conversation_mode": "repairing", "repair_pending": True, "recent_quick_reply_count": 0}, merge=True)
+        msg = handle_disagreement_repair()
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
-    if user_data.get("repair_pending") and mode == "post_oracle":
+    if user_data.get("repair_pending") and mode in {"post_oracle", "repairing"}:
         known_slots = user_data.get("known_slots") or {}
         current_topic = user_data.get("current_topic") or user_data.get("last_topic") or "relationship"
 
@@ -1200,6 +1436,7 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                 "active_consultation_text": active_text,
                 "last_consultation_text": user_text,
                 "ui_state": "none",
+                "recent_quick_reply_count": 0,
             },
             merge=True,
         )
@@ -1210,6 +1447,7 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
             "known_slots": known_slots,
             "active_consultation_text": active_text,
             "last_consultation_text": user_text,
+            "recent_quick_reply_count": 0,
         }
         route = "continue_consult"
 
@@ -1228,6 +1466,7 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                 "last_consultation_text": user_text,
                 "known_slots": known_slots,
                 "ui_state": "none",
+                "recent_quick_reply_count": 0,
             },
             merge=True,
         )
@@ -1237,8 +1476,9 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
         missing = [s for s in needed if s not in known_slots]
 
         if len(filled) >= min(3, len(needed)):
-            bridge = "今の揺れ方はある程度見えてきました。では、この流れを言葉にします。"
-            reply_text, oracle_result, context_feats = build_reading_reply(
+            bridge = choose_variant("reading_bridge", user_data)
+            save_variant_state(user_ref, "reading_bridge", user_data)
+            reply_body, oracle_result, context_feats = build_reading_reply(
                 user_data={**user_data, "current_topic": topic},
                 active_text=active_text,
                 known_slots=known_slots,
@@ -1255,10 +1495,11 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                         "known_slots": known_slots,
                         "last_topic": oracle_result["topic"],
                         "ui_state": "awaiting_birthdate",
+                        "recent_quick_reply_count": 1,
                     },
                     merge=True,
                 )
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=f"{bridge}\n\n{reply_text}", quick_reply=birth_qr))
+                reply_and_remember(reply_token, user_ref, user_data, f"{bridge}\n\n{reply_body}", quick_reply=birth_qr)
                 return
 
             user_ref.set(
@@ -1269,16 +1510,19 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                     "last_context": context_feats,
                     "known_slots": known_slots,
                     "last_topic": oracle_result["topic"],
+                    "recent_quick_reply_count": 0,
                 },
                 merge=True,
             )
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"{bridge}\n\n{reply_text}"))
+            reply_and_remember(reply_token, user_ref, user_data, f"{bridge}\n\n{reply_body}")
             return
 
-        if missing and should_offer_quick_reply(user_data, missing):
+        if missing and should_offer_quick_reply(user_data, missing, turn_meta=turn_meta):
             slot = missing[0]
             qr = build_quick_reply_for_slot(slot, topic)
             prompt = build_slot_prompt(slot, topic)
+            intro = choose_variant("consult_intro", user_data)
+            save_variant_state(user_ref, "consult_intro", user_data)
             user_ref.set(
                 {
                     "last_question": prompt,
@@ -1289,17 +1533,19 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                         "topic": topic,
                         "asked_at": now_utc().isoformat(),
                     },
+                    "recent_quick_reply_count": 1,
                 },
                 merge=True,
             )
-            intro = "まだ断定の段階ではありません。先に揺れの濃いところだけ拾わせてください。"
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"{intro}\n{prompt}", quick_reply=qr))
+            reply_and_remember(reply_token, user_ref, user_data, f"{intro}\n{prompt}", quick_reply=qr)
             return
 
-        next_question = "もう少しだけ、そのまま話してください。"
-        user_ref.set({"last_question": next_question, "missing_slots": missing}, merge=True)
-        intro = "先に揺れの濃いところだけ拾わせてください。"
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=f"{intro}\n{next_question}"))
+        next_question = choose_variant("continue_prompt", user_data)
+        save_variant_state(user_ref, "continue_prompt", user_data)
+        intro = choose_variant("consult_intro", user_data)
+        save_variant_state(user_ref, "consult_intro", user_data)
+        user_ref.set({"last_question": next_question, "missing_slots": missing, "recent_quick_reply_count": 0}, merge=True)
+        reply_and_remember(reply_token, user_ref, user_data, f"{intro}\n{next_question}")
         return
 
     if route == "continue_consult":
@@ -1320,6 +1566,7 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                 "last_consultation_text": user_text,
                 "known_slots": known_slots,
                 "ui_state": "none",
+                "recent_quick_reply_count": 0,
             },
             merge=True,
         )
@@ -1329,8 +1576,9 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
         missing = [s for s in needed if s not in known_slots]
 
         if len(filled) >= min(3, len(needed)):
-            bridge = "今の揺れ方はある程度見えてきました。では、この流れを言葉にします。"
-            reply_text, oracle_result, context_feats = build_reading_reply(
+            bridge = choose_variant("reading_bridge", user_data)
+            save_variant_state(user_ref, "reading_bridge", user_data)
+            reply_body, oracle_result, context_feats = build_reading_reply(
                 user_data={**user_data, "current_topic": current_topic},
                 active_text=active_text,
                 known_slots=known_slots,
@@ -1349,10 +1597,11 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                         "last_context": context_feats,
                         "last_topic": oracle_result["topic"],
                         "ui_state": "awaiting_birthdate",
+                        "recent_quick_reply_count": 1,
                     },
                     merge=True,
                 )
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=f"{bridge}\n\n{reply_text}", quick_reply=birth_qr))
+                reply_and_remember(reply_token, user_ref, user_data, f"{bridge}\n\n{reply_body}", quick_reply=birth_qr)
                 return
 
             user_ref.set(
@@ -1365,16 +1614,19 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                     "last_oracle_summary": oracle_result["summary"],
                     "last_context": context_feats,
                     "last_topic": oracle_result["topic"],
+                    "recent_quick_reply_count": 0,
                 },
                 merge=True,
             )
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"{bridge}\n\n{reply_text}"))
+            reply_and_remember(reply_token, user_ref, user_data, f"{bridge}\n\n{reply_body}")
             return
 
-        if missing and should_offer_quick_reply(user_data, missing):
+        if missing and should_offer_quick_reply(user_data, missing, turn_meta=turn_meta):
             slot = missing[0]
             qr = build_quick_reply_for_slot(slot, current_topic)
             prompt = build_slot_prompt(slot, current_topic)
+            intro = choose_variant("consult_intro", user_data)
+            save_variant_state(user_ref, "consult_intro", user_data)
             user_ref.set(
                 {
                     "last_question": prompt,
@@ -1385,19 +1637,21 @@ def handle_message_flow(reply_token: str, user_ref, user_data: dict, user_text: 
                         "topic": current_topic,
                         "asked_at": now_utc().isoformat(),
                     },
+                    "recent_quick_reply_count": 1,
                 },
                 merge=True,
             )
-            bridge = "いまはまだ全体像ではなく、濃い部分を拾っている段階です。"
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"{bridge}\n{prompt}", quick_reply=qr))
+            reply_and_remember(reply_token, user_ref, user_data, f"{intro}\n{prompt}", quick_reply=qr)
             return
 
-        next_question = "もう少しだけ、そのまま話してください。"
-        user_ref.set({"last_question": next_question, "missing_slots": missing}, merge=True)
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=next_question))
+        next_question = choose_variant("continue_prompt", user_data)
+        save_variant_state(user_ref, "continue_prompt", user_data)
+        user_ref.set({"last_question": next_question, "missing_slots": missing, "recent_quick_reply_count": 0}, merge=True)
+        reply_and_remember(reply_token, user_ref, user_data, next_question)
         return
 
-    line_bot_api.reply_message(reply_token, TextSendMessage(text="そのまま話してください。必要なところだけ、こちらで拾っていきます。"))
+    msg = "そのまま話して大丈夫です。必要なところだけ、こちらで拾います。"
+    reply_and_remember(reply_token, user_ref, user_data, msg)
 
 
 # -------------------------
@@ -1435,6 +1689,7 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
             {
                 "ui_state": "none",
                 "pending_relation_choice": firestore.DELETE_FIELD,
+                "recent_quick_reply_count": 0,
             },
             merge=True,
         )
@@ -1442,7 +1697,8 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
         if choice == "resume":
             bookmark = user_data.get("bookmark") or {}
             user_ref.set({"conversation_mode": "consulting"}, merge=True)
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=build_resume_reply(bookmark)))
+            msg = build_resume_reply(bookmark)
+            reply_and_remember(reply_token, user_ref, user_data, msg)
             return
 
         if choice == "new":
@@ -1454,30 +1710,28 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
                     "current_topic": None,
                     "known_slots": {},
                     "ui_state": "none",
+                    "recent_quick_reply_count": 0,
                 }
                 handle_message_flow(reply_token, user_ref, refreshed, incoming_text)
                 return
 
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="わかりました。では今回は別の盤面として受け取ります。新しく視たいことを、そのまま話してください。"))
+            msg = "わかりました。では今回は別の盤面として受け取ります。新しく視たいことを、そのまま話してください。"
+            reply_and_remember(reply_token, user_ref, user_data, msg)
             return
 
-        line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text="無理に分けなくても大丈夫です。いま気になっていることを、そのまま少しだけ言葉にしてみてください。")
-        )
+        msg = "無理に分けなくても大丈夫です。いま気になっていることを、そのまま少しだけ言葉にしてみてください。"
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
     if data.get("type") == "birthdate_picker":
         params = getattr(event.postback, "params", None) or {}
         picked_date = params.get("date")
         if not picked_date:
-            line_bot_api.reply_message(
-                reply_token,
-                TextSendMessage(text="日付の受け取りに少し乱れがありました。テキストで送っても大丈夫です。")
-            )
+            msg = "日付の受け取りに少し乱れがありました。テキストで送っても大丈夫です。"
+            reply_and_remember(reply_token, user_ref, user_data, msg)
             return
 
-        user_ref.set({"birth_date": picked_date, "ui_state": "none", "pending_birthdate_request": False}, merge=True)
+        user_ref.set({"birth_date": picked_date, "ui_state": "none", "pending_birthdate_request": False, "recent_quick_reply_count": 0}, merge=True)
 
         active_text = user_data.get("active_consultation_text") or user_data.get("last_consultation_text")
         current_topic = user_data.get("current_topic") or user_data.get("last_topic")
@@ -1485,7 +1739,7 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
 
         if active_text and current_topic:
             refreshed_user_data = {**user_data, "birth_date": picked_date}
-            reply_text, oracle_result, context_feats = build_reading_reply(
+            reply_body, oracle_result, context_feats = build_reading_reply(
                 user_data=refreshed_user_data,
                 active_text=active_text,
                 known_slots=known_slots,
@@ -1499,37 +1753,27 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
                 },
                 merge=True,
             )
-            line_bot_api.reply_message(
-                reply_token,
-                TextSendMessage(
-                    text=(
-                        f"生まれた日の気配を受け取りました。{picked_date} として記録しておきます。\n\n"
-                        f"その巡りも重ねて、今の流れをもう一度視ました。\n{reply_text}"
-                    )
-                ),
+            msg = (
+                f"生まれた日の気配を受け取りました。{picked_date} として記録しておきます。\n\n"
+                f"その巡りも重ねて、今の流れをもう一度視ました。\n{reply_body}"
             )
+            reply_and_remember(reply_token, user_ref, user_data, msg)
             return
 
-        line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text=f"生まれた日の気配を受け取りました。{picked_date} として記録しておきます。")
-        )
+        msg = f"生まれた日の気配を受け取りました。{picked_date} として記録しておきます。"
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
     if data.get("type") == "birthdate_manual":
-        user_ref.set({"ui_state": "awaiting_birthdate", "pending_birthdate_request": True}, merge=True)
-        line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text="生年月日をそのまま送ってください。西暦でも和暦でも大丈夫です。")
-        )
+        user_ref.set({"ui_state": "awaiting_birthdate", "pending_birthdate_request": True, "recent_quick_reply_count": 0}, merge=True)
+        msg = "生年月日をそのまま送ってください。西暦でも和暦でも大丈夫です。"
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
     if data.get("type") == "birthdate_skip":
-        user_ref.set({"ui_state": "none", "pending_birthdate_request": False}, merge=True)
-        line_bot_api.reply_message(
-            reply_token,
-            TextSendMessage(text="わかりました。必要になったら、あとからでも預けられます。")
-        )
+        user_ref.set({"ui_state": "none", "pending_birthdate_request": False, "recent_quick_reply_count": 0}, merge=True)
+        msg = "わかりました。必要になったら、あとからでも預けられます。"
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
     if "slot" in data and "value" in data:
@@ -1545,10 +1789,12 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
                     "known_slots": known_slots,
                     "ui_state": "none",
                     "conversation_mode": "consulting",
+                    "recent_quick_reply_count": 0,
                 },
                 merge=True,
             )
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=unresolved_slot_response(slot)))
+            msg = unresolved_slot_response(slot)
+            reply_and_remember(reply_token, user_ref, user_data, msg)
             return
 
         known_slots = apply_quick_reply_selection(user_data, data)
@@ -1564,13 +1810,16 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
                 "known_slots": known_slots,
                 "ui_state": "none",
                 "conversation_mode": "consulting",
+                "recent_quick_reply_count": 0,
+                "last_user_ignored_quick_reply": False,
             },
             merge=True,
         )
 
         if len(filled) >= min(3, len(needed)):
-            bridge = "今の揺れ方はある程度見えてきました。では、この流れを言葉にします。"
-            reply_text, oracle_result, context_feats = build_reading_reply(
+            bridge = choose_variant("reading_bridge", user_data)
+            save_variant_state(user_ref, "reading_bridge", user_data)
+            reply_body, oracle_result, context_feats = build_reading_reply(
                 user_data={**user_data, "current_topic": current_topic},
                 active_text=active_text or current_topic,
                 known_slots=known_slots,
@@ -1586,10 +1835,11 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
                         "last_context": context_feats,
                         "last_topic": oracle_result["topic"],
                         "ui_state": "awaiting_birthdate",
+                        "recent_quick_reply_count": 1,
                     },
                     merge=True,
                 )
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=f"{bridge}\n\n{reply_text}", quick_reply=birth_qr))
+                reply_and_remember(reply_token, user_ref, user_data, f"{bridge}\n\n{reply_body}", quick_reply=birth_qr)
                 return
 
             user_ref.set(
@@ -1602,10 +1852,10 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
                 },
                 merge=True,
             )
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"{bridge}\n\n{reply_text}"))
+            reply_and_remember(reply_token, user_ref, user_data, f"{bridge}\n\n{reply_body}")
             return
 
-        if missing and should_offer_quick_reply(user_data, missing):
+        if missing and should_offer_quick_reply(user_data, missing, turn_meta={"intent": "continue_consult", "turn_zone": "consultation"}):
             next_slot = missing[0]
             qr = build_quick_reply_for_slot(next_slot, current_topic)
             prompt = build_slot_prompt(next_slot, current_topic)
@@ -1619,16 +1869,19 @@ def handle_postback_flow(reply_token: str, user_ref, user_data: dict, event: Pos
                         "topic": current_topic,
                         "asked_at": now_utc().isoformat(),
                     },
+                    "recent_quick_reply_count": 1,
                 },
                 merge=True,
             )
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=prompt, quick_reply=qr))
+            reply_and_remember(reply_token, user_ref, user_data, prompt, quick_reply=qr)
             return
 
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="そのまま続けて話してください。必要な輪郭は少しずつ見えてきています。"))
+        msg = "そのまま続けて話してください。必要な輪郭は少しずつ見えてきています。"
+        reply_and_remember(reply_token, user_ref, user_data, msg)
         return
 
-    line_bot_api.reply_message(reply_token, TextSendMessage(text="そのまま続けてください。必要なところだけ、こちらで拾っていきます。"))
+    msg = "そのまま続けてください。必要なところだけ、こちらで拾っていきます。"
+    reply_and_remember(reply_token, user_ref, user_data, msg)
 
 
 # -------------------------
