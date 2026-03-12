@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Any
+from typing import Dict, Any
 
 
 @dataclass
@@ -12,10 +12,10 @@ class EngineState:
     layer_weights: Dict[str, float] = field(default_factory=lambda: {
         "identity": 1.0,
         "temporal": 1.0,
-        "symbolic": 1.2,
-        "context": 1.3,
-        "memory": 1.1,
-        "branch": 1.2
+        "symbolic": 1.15,
+        "context": 1.25,
+        "memory": 1.0,
+        "branch": 1.1
     })
     samples: int = 0
     backtest_score: float = 0.50
@@ -40,7 +40,6 @@ class TopicClassifier:
 
     def classify(self, text: str) -> str:
         scores = {"love": 0, "work": 0, "relationship": 0}
-
         for topic, keywords in self.topic_keywords.items():
             for kw in keywords:
                 if kw in text:
@@ -52,51 +51,15 @@ class TopicClassifier:
         return best_topic
 
 
-class QuestionEngine:
-    def get_question_set(self, topic: str, is_paid: bool = False) -> List[str]:
-        common_questions = [
-            "その悩みって、急に強くなった感じですか？ それとも前からずっと続いていましたか？",
-            "今の気持ちにいちばん近いのはどれですか？ 焦り / 悲しさ / イライラ / 何も感じない感じ"
-        ]
-
-        topic_questions = {
-            "love": [
-                "相手との距離は今どうですか？ 近い / 少し離れている / かなり離れている",
-                "今のあなたの気持ちはどれに近いですか？ 動きたい / 様子を見たい / もう終わらせたい"
-            ],
-            "work": [
-                "いちばんしんどいのはどれですか？ 仕事量 / 人間関係 / 将来の不安",
-                "今の気持ちはどちらに近いですか？ 辞めたい / まだ様子を見たい"
-            ],
-            "relationship": [
-                "その相手は誰に近いですか？ 家族 / 友人 / 職場 / 恋人",
-                "今の気持ちはどちらに近いですか？ 仲直りしたい / 少し距離を置きたい"
-            ]
-        }
-
-        if is_paid:
-            return [
-                common_questions[0],
-                common_questions[1],
-                topic_questions.get(topic, ["今の状況をもう少し詳しく教えてください。"])[0]
-            ]
-        else:
-            return [
-                common_questions[0],
-                topic_questions.get(topic, ["今の状況をもう少し詳しく教えてください。"])[0]
-            ]
-
-
 class RevelationEngine:
     def score_to_phase(self, action_score: float, risk_score: float) -> str:
-        if risk_score > 0.75:
-            return "少し無理をすると流れが崩れやすい時です"
-        elif action_score > 0.70 and risk_score < 0.45:
-            return "流れが開きやすく、動いたことが形になりやすい時です"
-        elif action_score < 0.48 and risk_score < 0.58:
-            return "今は大きく動くより、整えることで次が見えてくる時です"
-        else:
-            return "止まって見えても、内側では流れが変わり始めています"
+        if risk_score > 0.76:
+            return "無理に進むより、いったん流れを静めた方がいい時です"
+        if action_score > 0.70 and risk_score < 0.45:
+            return "流れが開きやすく、小さな動きが形になりやすい時です"
+        if action_score < 0.48 and risk_score < 0.60:
+            return "今は動くより整えることで、次の輪郭が見えてくる時です"
+        return "止まって見えても、内側では流れが少しずつ組み替わっています"
 
     def risk_to_warning(self, topic: str, risk_score: float, noise_score: float) -> str:
         if topic == "love":
@@ -104,67 +67,56 @@ class RevelationEngine:
                 return "今は相手そのものより、不安に引っぱられて判断しやすい流れがあります。"
             if risk_score > 0.72:
                 return "答えを急ぎすぎると、縁の輪郭が見えにくくなりやすい時です。"
-            return "縁そのものは閉じていませんが、押し方を間違えると細くなりやすい気配があります。"
+            return "縁そのものは閉じていませんが、押し方を誤ると細くなりやすい気配があります。"
 
         if topic == "work":
             if risk_score > 0.72:
-                return "今は頑張り不足というより、疲れの積み重なりが判断を鈍らせやすい時です。"
+                return "今は努力不足というより、消耗の蓄積が判断を鈍らせやすい時です。"
             if noise_score > 0.72:
-                return "問題そのものより、今の消耗が大きく見せている部分があります。"
-            return "状況は固まっているように見えても、見方を変えると出口が見え始める流れです。"
+                return "問題そのものより、疲れが状況を重く見せている部分があります。"
+            return "状況は固まって見えても、見方を変えると出口はまだ残っています。"
 
         if risk_score > 0.72:
             return "相手や環境よりも、心の疲れが関係の見え方をゆがめやすい時です。"
         return "今の関係は、切れるというより距離の取り方で形が変わる可能性があります。"
 
-    def action_guidance(self, action_label: str, topic: str) -> str:
-        guidance_map = {
-            "wait": "今日は結論を急ぐより、ひとつだけ整えてから次を見る方が流れに合っています。",
-            "move": "今は完全に止まるより、小さく動いた方が流れに噛み合いやすいです。",
+    def action_guidance(self, action_label: str) -> str:
+        mapping = {
+            "wait": "今は結論を急ぐより、ひとつだけ整えてから次を見る方が流れに合っています。",
+            "move": "完全に止まるより、小さく動いた方が流れに噛み合いやすいです。",
             "rest": "まず心と体の消耗を落とすことが先です。休むこと自体が流れを戻します。",
             "soft_contact": "強く押すより、やわらかく気配を見せるくらいがちょうどいい時です。",
-            "distance": "無理に関係をつなぐより、少し距離を置くことで本当の輪郭が見えやすくなります。"
+            "distance": "無理につなぐより、少し距離を置いた方が本当の輪郭が見えやすくなります。"
         }
-        return guidance_map.get(action_label, "今は急いで答えを取りにいくより、自分の内側を整える方が次につながります。")
+        return mapping.get(action_label, "今は急いで答えを取りにいくより、自分の内側を整える方が次につながります。")
 
-    def build_message(self, topic: str, scores: Dict[str, float], date_str: str, is_paid: bool = False) -> str:
+    def build_message(self, topic: str, scores: Dict[str, float], is_paid: bool = False) -> str:
         action_score = scores["action_score"]
         risk_score = scores["risk_score"]
         noise_score = scores["noise_score"]
         action_label = scores["best_action"]
 
-        phase = self.score_to_phase(action_score, risk_score)
-        warning = self.risk_to_warning(topic, risk_score, noise_score)
-        guidance = self.action_guidance(action_label, topic)
-
         opening_map = {
-            "love": [
-                "今の恋の流れには、少し霧があります。",
-                "今は恋の行方よりも、心の揺れが強く出やすい時です。",
-                "この恋は止まっているようで、内側ではまだ動いています。"
-            ],
-            "work": [
-                "今の仕事の流れは、静かに形を変え始めています。",
-                "今は結果そのものより、疲れの影が判断に混じりやすい時です。",
-                "仕事の流れは止まって見えても、水面下では少しずつ変わっています。"
-            ],
-            "relationship": [
-                "今の縁は、切れるというより揺れている状態です。",
-                "人との流れは、押すより整えることで輪郭が見えやすくなる時です。",
-                "今の関係には、言葉より先に気配のずれが出ています。"
-            ]
+            "love": "今の恋の流れには、少し霧があります。",
+            "work": "今の仕事の流れは、静かに形を変え始めています。",
+            "relationship": "今の縁は、切れるというより揺れている状態です。"
         }
 
-        opening = opening_map.get(topic, ["今の流れは、静かに揺れています。"])[0]
+        opening = opening_map.get(topic, "今の流れは、静かに揺れています。")
+        phase = self.score_to_phase(action_score, risk_score)
+        warning = self.risk_to_warning(topic, risk_score, noise_score)
+        guidance = self.action_guidance(action_label)
 
-        if is_paid:
-            tail = "見えるものだけで決めるより、まだ見えていない流れごと受け取った方が道はきれいにつながります。"
-        else:
-            tail = "無理に未来を掴みにいくより、流れの癖を見抜いた者から道は開きます。"
+        tail = (
+            "見えるものだけで決めるより、まだ見えていない流れごと受け取った方が道はきれいにつながります。"
+            if is_paid
+            else
+            "無理に未来を掴みにいくより、流れの癖を見抜いた者から道は開きます。"
+        )
 
         return (
             f"{opening}\n\n"
-            f"今のあなたは、{phase}。\n"
+            f"今のあなたは、{phase}\n"
             f"{warning}\n"
             f"{guidance}\n\n"
             f"{tail}"
@@ -175,18 +127,13 @@ class OracleEngine:
     def __init__(self, state: EngineState):
         self.state = state
         self.topic_classifier = TopicClassifier()
-        self.question_engine = QuestionEngine()
         self.revelation_engine = RevelationEngine()
 
     def identity_layer(self, user_profile: Dict[str, Any]) -> Dict[str, float]:
-        resilience = float(user_profile.get("resilience", 0.5))
-        sensitivity = float(user_profile.get("sensitivity", 0.5))
-        patience = float(user_profile.get("patience", 0.5))
-
         return {
-            "resilience": resilience,
-            "sensitivity": sensitivity,
-            "patience": patience
+            "resilience": float(user_profile.get("resilience", 0.55)),
+            "sensitivity": float(user_profile.get("sensitivity", 0.70)),
+            "patience": float(user_profile.get("patience", 0.45))
         }
 
     def temporal_layer(self, horizon: str) -> Dict[str, float]:
@@ -254,7 +201,7 @@ class OracleEngine:
 
     def memory_layer(self, memory: Dict[str, Any]) -> Dict[str, float]:
         repeat_count = int(memory.get("repeat_count", 1))
-        volatility = float(memory.get("volatility", 0.5))
+        volatility = float(memory.get("volatility", 0.55))
         repeat_pressure = min(repeat_count / 10.0, 1.0)
 
         return {
@@ -274,13 +221,10 @@ class OracleEngine:
         resilience = identity["resilience"]
         sensitivity = identity["sensitivity"]
         patience = identity["patience"]
-
         time_openness = temporal["time_openness"]
         symbolic_balance = symbolic["symbolic_balance"]
-
         risk_score = context["risk_score"]
         urgency = context["urgency"]
-
         repeat_pressure = memory["repeat_pressure"]
         volatility = memory["volatility"]
 
@@ -324,28 +268,33 @@ class OracleEngine:
             "best_action": best_action
         }
 
-    def build_internal_summary(self, topic: str, scores: Dict[str, float]) -> Dict[str, str]:
-        risk_score = scores["risk_score"]
+    def build_summary(self, topic: str, scores: Dict[str, float]) -> Dict[str, str]:
         action_score = scores["action_score"]
-        action_label = scores["best_action"]
-
+        risk_score = scores["risk_score"]
         phase = self.revelation_engine.score_to_phase(action_score, risk_score)
+        risk_hint = self.revelation_engine.risk_to_warning(topic, risk_score, scores["noise_score"])
+        action_hint = self.revelation_engine.action_guidance(scores["best_action"])
 
         if topic == "love":
-            core = "不安が強くなるほど、相手そのものより自分の揺れに引っぱられやすい流れ"
+            core_meaning = "不安が強くなるほど、相手そのものより自分の揺れに引っぱられやすい流れです。"
+            metaphor = "霧"
+            oracle_phase = "縁の輪郭が曇りやすい時期"
         elif topic == "work":
-            core = "努力不足というより、疲れの蓄積が判断を重くしている流れ"
+            core_meaning = "努力不足というより、疲れの蓄積が判断を重くしている流れです。"
+            metaphor = "重い潮流"
+            oracle_phase = "整え直しの時期"
         else:
-            core = "関係そのものより、距離や受け取り方で見え方が変わりやすい流れ"
-
-        risk_hint = self.revelation_engine.risk_to_warning(topic, risk_score, scores["noise_score"])
-        action_hint = self.revelation_engine.action_guidance(action_label, topic)
+            core_meaning = "関係そのものより、距離や受け取り方で見え方が変わりやすい流れです。"
+            metaphor = "揺れる水面"
+            oracle_phase = "関係の再調整期"
 
         return {
             "phase": phase,
-            "core_meaning": core,
+            "core_meaning": core_meaning,
             "action_hint": action_hint,
-            "risk_hint": risk_hint
+            "risk_hint": risk_hint,
+            "oracle_metaphor": metaphor,
+            "oracle_phase": oracle_phase
         }
 
     def predict(
@@ -353,9 +302,8 @@ class OracleEngine:
         user_profile: Dict[str, Any],
         context_feats: Dict[str, Any],
         user_text: str,
-        date_str: str,
         horizon: str = "today",
-        memory: Dict[str, Any] = None,
+        memory: Dict[str, Any] | None = None,
         is_paid: bool = False
     ) -> Dict[str, Any]:
         if memory is None:
@@ -378,26 +326,15 @@ class OracleEngine:
             memory=memory_scores
         )
 
-        revelation = self.revelation_engine.build_message(
-            topic=topic,
-            scores=scores,
-            date_str=date_str,
-            is_paid=is_paid
-        )
-
-        summary = self.build_internal_summary(topic, scores)
-
-        followup_questions = self.question_engine.get_question_set(topic, is_paid=is_paid)
+        message = self.revelation_engine.build_message(topic=topic, scores=scores, is_paid=is_paid)
+        summary = self.build_summary(topic=topic, scores=scores)
 
         self.state.samples += 1
 
         return {
             "topic": topic,
-            "date": date_str,
-            "horizon": horizon,
             "scores": scores,
-            "message": revelation,
+            "message": message,
             "summary": summary,
-            "followup_questions": followup_questions,
-            "engine_version": "ORACLE-v3-conversation"
+            "engine_version": "ORACLE-v1.5"
         }
