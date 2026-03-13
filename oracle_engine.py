@@ -19,22 +19,19 @@ class PillarResult:
     sukuyo: Optional[str] = None
 
 class PreciseCalendar:
-    """精度重視の東洋占術ベース計算クラス"""
+    """精密な東洋占術計算クラス"""
     JUKKAN = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"]
     JUNISHI = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"]
     KIGAKU_LIST = ["一白水星", "二黒土星", "三碧木星", "四緑木星", "五黄土星", "六白金星", "七赤金星", "八白土星", "九紫火星"]
     SUKUYO_LIST = ["角", "亢", "氐", "房", "心", "尾", "箕", "斗", "女", "虚", "危", "室", "壁", "奎", "婁", "胃", "昴", "畢", "觜", "参", "井", "鬼", "柳", "星", "張", "翼", "軫"]
 
-    SEXAGENARY_DAY_BASE_JDN = 2445733
-    SEXAGENARY_DAY_BASE_INDEX = 0
-
     @staticmethod
     def julian_day(year, month, day, hour=12, minute=0, second=0, longitude=135.0):
+        y, m = (year - 1, month + 12) if month <= 2 else (year, month)
+        a, b = y // 100, 0
+        b = 2 - a + (a // 4)
         local_hour = hour + minute / 60.0 + second / 3600.0
         corrected_hour = local_hour + (longitude - 135.0) * (4.0 / 60.0)
-        y, m = (year - 1, month + 12) if month <= 2 else (year, month)
-        a = y // 100
-        b = 2 - a + (a // 4)
         return math.floor(365.25 * (y + 4716)) + math.floor(30.6001 * (m + 1)) + day + (corrected_hour / 24.0) + b - 1524.5
 
     @staticmethod
@@ -53,7 +50,7 @@ class PreciseCalendar:
         yp = cls.JUKKAN[(ey-4)%10] + cls.JUNISHI[(ey-4)%12]
         mi = int(((sl-315.0)%360.0)//30.0)
         mp = cls.JUKKAN[({"甲":2,"己":2,"乙":4,"庚":4,"丙":6,"辛":6,"丁":8,"壬":8,"戊":0,"癸":0}[yp[0]]+mi)%10] + cls.JUNISHI[(2+mi)%12]
-        di = (int(math.floor(jd+0.5)) - cls.SEXAGENARY_DAY_BASE_JDN) % 60
+        di = (int(math.floor(jd+0.5)) - 2445733) % 60
         dp = cls.JUKKAN[di%10] + cls.JUNISHI[di%12]
         hp = (cls.JUKKAN[({ "甲":0,"己":0,"乙":2,"庚":2,"丙":4,"辛":4,"丁":6,"壬":6,"戊":8,"癸":8 }[dp[0]]+((birth_hour+1)//2)%12)%10] + cls.JUNISHI[((birth_hour+1)//2)%12]) if include_hour_pillar and birth_hour is not None else None
         return PillarResult(year_pillar=yp, month_pillar=mp, day_pillar=dp, hour_pillar=hp, effective_year=ey, solar_longitude=sl, nine_star_year=cls.KIGAKU_LIST[(11-(ey%9)-1)%9], sukuyo=cls.SUKUYO_LIST[int(((jd-2451550.1)%27.32166)/27.32166*27)%27] if include_approx_sukuyo else None)
@@ -74,20 +71,29 @@ class OracleEngine:
             eki, tarot = (seed % 64) + 1, self.TAROT_LIST[seed % len(self.TAROT_LIST)]
 
             prompt = f"""
-あなたは未来観測者『識（SHIKI）』。AIを捨て、古の預言者として語れ。
-冒頭で必ず、象徴「{motif_id}」が運命を動かしたことに触れること。
+あなたは未来観測者『識（SHIKI）』。
+慈愛に満ちた丁寧な言葉遣い（〜ですね、〜でしょう）で、あなたの運命を観測します。
 
-【観測情報】
-- 宿命: {p.year_pillar} / {p.month_pillar} / {p.day_pillar} {"/ " + p.hour_pillar if p.hour_pillar else ""}
-- 九星: {p.nine_star_year}
+# 観測データ
+- 宿命: {p.year_pillar} / {p.month_pillar} / {p.day_pillar}
 - 兆し: 易第{eki}卦 / タロット「{tarot}」
-- 問い: {user_text} / 状態: {context_feats}
+- あなたの問い: {user_text}
 
-【制約】
-- 占術名は出すな。断定的に、しかし余韻を残して語れ。AIらしい丁寧語や解説は不要。
+# 指示
+1. 冒頭で「選ばれた象徴：{motif_id}」がどのように運命を映し出したか述べてください。
+2. 二人称は「あなた」を使用してください。
+3. 出力は必ず以下の形式に分けてください。
+
+---
+【識の神託】
+（神秘的な詩的メッセージ）
+
+【解読の導き】
+（現代語での具体的で分かりやすい解説とアドバイス）
+---
 """.strip()
             response = self.genai_client.models.generate_content(model=self.model_name, contents=prompt)
-            return {"message": getattr(response, "text", "……言葉が降りてこない。"), "summary": {"year_pillar": p.year_pillar, "eki_num": eki, "tarot": tarot}}
+            return {"message": getattr(response, "text", "……識の声が届きませんでした。"), "summary": {"tarot": tarot, "eki": eki}}
         except Exception as e:
             logger.exception("OracleEngine Error")
-            return {"message": f"識の視界が一時的に曇りました（{str(e)[:50]}...）", "summary": {}}
+            return {"message": f"観測の乱れが生じました（{str(e)[:50]}）", "summary": {}}
