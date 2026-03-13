@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import unicodedata
+import threading
 from datetime import datetime, timezone
 from typing import Optional, Tuple, Dict, Any
 
@@ -105,15 +106,6 @@ def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
 
 
 def build_user_profile(user_data: dict) -> dict:
-    """
-    Firestoreの user_data から OracleEngine 向けプロフィールを構築する。
-    想定フィールド:
-    - birth_date: "YYYY-MM-DD"
-    - birth_hour: 0-23
-    - birth_minute: 0-59
-    - birth_second: 0-59
-    - birth_longitude: 経度（例 139.6917）
-    """
     birth_date = user_data.get("birth_date", "1990-01-01")
 
     try:
@@ -185,6 +177,44 @@ def build_reading_reply(
 
 
 # -------------------------
+# 非同期返信処理
+# -------------------------
+def process_and_push_reply(user_id: str, user_text: str) -> None:
+    try:
+        user_ref = db.collection("users").document(user_id)
+        snap = user_ref.get()
+        user_data = snap.to_dict() or {}
+
+        reply, result, ctx = build_reading_reply(user_data, user_text, {})
+
+        update_payload = {
+            "last_active": datetime.now(timezone.utc),
+            "last_user_message": user_text,
+            "last_oracle_message": reply,
+            "last_oracle_summary": result.get("summary", {}),
+            "updated_at": datetime.now(timezone.utc),
+        }
+        user_ref.set(update_payload, merge=True)
+
+        line_bot_api.push_message(
+            user_id,
+            TextSendMessage(text=reply)
+        )
+
+    except Exception:
+        logger.exception("process_and_push_reply error")
+        try:
+            line_bot_api.push_message(
+                user_id,
+                TextSendMessage(
+                    text="……識の視界が一時的に揺らぎました。少しだけ間を置いて、もう一度問いかけてください。"
+                )
+            )
+        except Exception:
+            logger.exception("Fallback push failed")
+
+
+# -------------------------
 # ヘルスチェック
 # -------------------------
 @app.get("/healthz")
@@ -225,55 +255,19 @@ async def callback(request: Request):
 # -------------------------
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event: MessageEvent):
-    u_id = event.source.user_id
+    user_id = event.source.user_id
     user_text = normalize_text(event.message.text)
 
     if not user_text:
-        try:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(
-                    text="……ことばがまだ届いていないようです。もう一度、静かに問いを送ってください。"
-                )
-            )
-        except Exception:
-            logger.exception("Empty text reply failed")
         return
 
-    try:
-        user_ref = db.collection("users").document(u_id)
-        snap = user_ref.get()
-        user_data = snap.to_dict() or {}
-
-        reply, result, ctx = build_reading_reply(user_data, user_text, {})
-
-        update_payload = {
-            "last_active": datetime.now(timezone.utc),
-            "last_user_message": user_text,
-            "last_oracle_message": reply,
-            "last_oracle_summary": result.get("summary", {}),
-            "updated_at": datetime.now(timezone.utc),
-        }
-
-        user_ref.set(update_payload, merge=True)
-
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply)
-        )
-
-    except Exception:
-        logger.exception("handle_text_message error")
-
-        fallback = "……識の視界が一時的に揺らぎました。少しだけ間を置いて、もう一度問いかけてください。"
-
-        try:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=fallback)
-            )
-        except Exception:
-            logger.exception("Fallback reply failed")
+    # webhookは即返し、重い処理は別スレッドへ
+    th = threading.Thread(
+        target=process_and_push_reply,
+        args=(user_id, user_text),
+        daemon=True,
+    )
+    th.start()
 
 
 # -------------------------
@@ -281,6 +275,5 @@ def handle_text_message(event: MessageEvent):
 # -------------------------
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
