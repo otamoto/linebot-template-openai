@@ -21,7 +21,9 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from oracle_engine import OracleEngine
 
+# -------------------------
 # 初期化
+# -------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s : %(message)s")
 logger = logging.getLogger(__name__)
 app = FastAPI(title="SHIKI LINE Bot")
@@ -44,12 +46,13 @@ db = firestore.client()
 
 oracle_engine = OracleEngine(gemini_client=genai_client, model_name=CHAT_MODEL)
 
-MOTIFS = [
-    {"label": "銀の鍵", "id": "silver_key"},
-    {"label": "砂時計", "id": "hourglass"},
-    {"label": "古びた鏡", "id": "ancient_mirror"},
-    {"label": "聖なる滴", "id": "holy_drop"}
-]
+# モチーフ定義
+MOTIFS = {
+    "silver_key": "銀の鍵",
+    "hourglass": "砂時計",
+    "ancient_mirror": "古びた鏡",
+    "holy_drop": "聖なる滴"
+}
 
 # ユーティリティ
 def normalize_text(text: str) -> str:
@@ -64,18 +67,11 @@ def build_user_profile(user_data: dict) -> dict:
         profile["birth_minute"] = int(user_data.get("birth_minute", 0))
     return profile
 
-# ツール表示関数
+# UI送信関数
 def send_birthday_picker(user_id: str, message: str):
     date_picker = ButtonsTemplate(
         text=message,
-        actions=[
-            DatetimePickerAction(
-                label="カレンダーで選択",
-                data="action=set_birthday",
-                mode="date",
-                initial="1995-01-01"
-            )
-        ]
+        actions=[DatetimePickerAction(label="カレンダーで選択", data="action=set_birthday", mode="date", initial="1995-01-01")]
     )
     line_bot_api.push_message(user_id, TemplateSendMessage(alt_text="生年月日を選択", template=date_picker))
 
@@ -83,12 +79,7 @@ def send_time_picker(user_id: str):
     time_picker = ButtonsTemplate(
         text="生まれた「時刻」も分かりますか？より詳細な観測が可能になります。",
         actions=[
-            DatetimePickerAction(
-                label="時刻を選択する",
-                data="action=set_birthtime",
-                mode="time",
-                initial="12:00"
-            ),
+            DatetimePickerAction(label="時刻を選択する", data="action=set_birthtime", mode="time", initial="12:00"),
             PostbackAction(label="分からない", data="action=set_birthtime_unknown")
         ]
     )
@@ -100,13 +91,11 @@ def process_and_push_reply(user_id: str, user_text: str, motif_id: Optional[str]
         user_ref = db.collection("users").document(user_id)
         user_data = user_ref.get().to_dict() or {}
 
-        # 1. リセット処理
         if user_text == "リセット":
             user_ref.delete()
             send_birthday_picker(user_id, "すべての記録を虚空へ返しました。新たな観測を始めましょう。あなたの生まれた日はいつですか？")
             return
 
-        # 2. プロフィール登録フロー
         if not user_data.get("birth_date"):
             if selected_date:
                 user_ref.set({"birth_date": selected_date}, merge=True)
@@ -119,25 +108,26 @@ def process_and_push_reply(user_id: str, user_text: str, motif_id: Optional[str]
             if selected_time:
                 h, m = map(int, selected_time.split(":"))
                 user_ref.set({"birth_hour": h, "birth_minute": m}, merge=True)
-                line_bot_api.push_message(user_id, TextSendMessage(text=f"{selected_time}。刻印が完成しました。今、あなたが一番視たいことを教えてください。"))
-            elif user_text == "UNKNOWN_TIME": # Postbackから来る
-                user_ref.set({"birth_hour": 12, "birth_minute": 0}, merge=True) # 不明な場合は正午
+                line_bot_api.push_message(user_id, TextSendMessage(text="刻印が完成しました。今、あなたが一番視たいことを教えてください。"))
+            elif user_text == "UNKNOWN_TIME":
+                user_ref.set({"birth_hour": 12, "birth_minute": 0}, merge=True)
                 line_bot_api.push_message(user_id, TextSendMessage(text="承知いたしました。では、日時の重なりを中心に観測します。今、あなたが一番視たいことを教えてください。"))
             else:
                 send_time_picker(user_id)
             return
 
-        # 3. 儀式フェーズ（モチーフ選択）
         if not motif_id:
             user_ref.set({"pending_consult": user_text}, merge=True)
-            buttons = [QuickReplyButton(action=PostbackAction(label=m["label"], data=f"action=select_motif&id={m['id']}", display_text=m["label"])) for m in MOTIFS]
+            buttons = [QuickReplyButton(action=PostbackAction(label=label, data=f"action=select_motif&id={m_id}", display_text=label)) for m_id, label in MOTIFS.items()]
             line_bot_api.push_message(user_id, TextSendMessage(text="準備は整いました。あなたの直感を重ねます。いま、心に触れる象徴を一つ選んでください。", quick_reply=QuickReply(items=buttons)))
             return
 
-        # 4. 鑑定実行
+        # 鑑定実行
         profile = build_user_profile(user_data)
         consult_text = user_data.get("pending_consult", "これからの運勢")
-        result = oracle_engine.predict(profile, {"stress": 0.5}, consult_text, motif_id)
+        motif_label = MOTIFS.get(motif_id, "静かなる光") # IDをラベルに変換
+        
+        result = oracle_engine.predict(profile, {"stress": 0.5}, consult_text, motif_label)
         
         line_bot_api.push_message(user_id, TextSendMessage(text=result.get("message", "……識の声が途切れました。")))
         user_ref.update({"pending_consult": firestore.DELETE_FIELD})
@@ -173,17 +163,12 @@ def handle_postback(event: PostbackEvent):
     
     if query.get("action") == "select_motif":
         threading.Thread(target=process_and_push_reply, args=(user_id, "", query.get("id")), daemon=True).start()
-    
     elif query.get("action") == "set_birthday":
-        selected_date = event.postback.params.get("date")
-        threading.Thread(target=process_and_push_reply, args=(user_id, "", None, selected_date), daemon=True).start()
-
+        threading.Thread(target=process_and_push_reply, args=(user_id, "", None, event.postback.params.get("date")), daemon=True).start()
     elif query.get("action") == "set_birthtime":
-        selected_time = event.postback.params.get("time")
-        threading.Thread(target=process_and_push_reply, args=(user_id, "", None, None, selected_time), daemon=True).start()
-    
+        threading.Thread(target=process_and_push_reply, args=(user_id, "", None, None, event.postback.params.get("time")), daemon=True).start()
     elif query.get("action") == "set_birthtime_unknown":
-        threading.Thread(target=process_and_push_reply, args=(user_id, "UNKNOWN_TIME", None, None, None), daemon=True).start()
+        threading.Thread(target=process_and_push_reply, args=(user_id, "UNKNOWN_TIME"), daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
