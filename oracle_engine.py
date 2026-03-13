@@ -130,7 +130,7 @@ class OracleEngine:
         try:
             # Gemini 2.0 Flash を使用して高速かつ高精度な人格生成
             response = self.genai_client.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-1.5-flash",
                 contents=prompt
             )
             return {
