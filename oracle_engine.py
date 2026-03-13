@@ -1,337 +1,142 @@
-from dataclasses import dataclass, field
+import math
+import hashlib
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any
 
+class PreciseCalendar:
+    """厳密な東洋占術計算のための暦法エンジン"""
+    JUKKAN = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"]
+    JUNISHI = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"]
+    SUKUYO_LIST = ["角", "亢", "氐", "房", "心", "尾", "箕", "斗", "女", "虚", "危", "室", "壁", "奎", "婁", "胃", "昴", "畢", "觜", "参", "井", "鬼", "柳", "星", "張", "翼", "軫"]
+    KIGAKU_LIST = ["一白水星", "二黒土星", "三碧木星", "四緑木星", "五黄土星", "六白金星", "七赤金星", "八白土星", "九紫火星"]
 
-@dataclass
-class EngineState:
-    method_weights: Dict[str, float] = field(default_factory=lambda: {
-        "astrology": 1.0,
-        "bazi": 1.0,
-        "kyusei": 1.0,
-    })
-    layer_weights: Dict[str, float] = field(default_factory=lambda: {
-        "identity": 1.0,
-        "temporal": 1.0,
-        "symbolic": 1.15,
-        "context": 1.25,
-        "memory": 1.0,
-        "branch": 1.1,
-    })
-    samples: int = 0
-    backtest_score: float = 0.50
+    @staticmethod
+    def get_solar_longitude(jd: float) -> float:
+        """ユリウス日から太陽黄経を算出（高精度近似式）"""
+        d = jd - 2451545.0
+        g = (357.529 + 0.98560028 * d) % 360
+        q = (280.459 + 0.98564736 * d) % 360
+        l = (q + 1.915 * math.sin(math.radians(g)) + 0.020 * math.sin(math.radians(2 * g))) % 360
+        return l
 
+    @classmethod
+    def get_sexagenary_cycle(cls, jd: float) -> str:
+        """日柱（日の干支）を算出"""
+        # JD 2451545.0 (2000/01/01) = 甲子(50番目スタート)
+        offset = int(math.floor(jd + 0.5) - 2451545 + 50) % 60
+        return cls.JUKKAN[offset % 10] + cls.JUNISHI[offset % 12]
 
-class TopicClassifier:
-    def __init__(self):
-        self.topic_keywords = {
-            "love": [
-                "恋", "恋愛", "好き", "彼", "彼女", "復縁", "片思い", "結婚",
-                "連絡", "告白", "会いたい", "別れ", "婚活", "相手", "既読無視"
-            ],
-            "work": [
-                "仕事", "会社", "上司", "部下", "転職", "退職", "職場",
-                "残業", "給与", "給料", "収入", "評価", "同僚", "疲れた"
-            ],
-            "relationship": [
-                "人間関係", "友達", "家族", "仲", "距離", "喧嘩", "孤独",
-                "苦しい", "嫌われた", "不安", "関係", "付き合い"
-            ],
-        }
-
-    def classify(self, text: str) -> str:
-        scores = {"love": 0, "work": 0, "relationship": 0}
-        for topic, keywords in self.topic_keywords.items():
-            for kw in keywords:
-                if kw in text:
-                    scores[topic] += 1
-
-        best = max(scores, key=scores.get)
-        return best if scores[best] > 0 else "relationship"
-
-
-class RevelationEngine:
-    def score_to_phase(self, action_score: float, risk_score: float) -> str:
-        if risk_score > 0.76:
-            return "無理に進むより、いったん流れを静めた方がいい時です"
-        if action_score > 0.70 and risk_score < 0.45:
-            return "流れが開きやすく、小さな動きが形になりやすい時です"
-        if action_score < 0.48 and risk_score < 0.60:
-            return "今は動くより整えることで、次の輪郭が見えてくる時です"
-        return "止まって見えても、内側では流れが少しずつ組み替わっています"
-
-    def risk_to_warning(self, topic: str, risk_score: float, noise_score: float) -> str:
-        if topic == "love":
-            if noise_score > 0.72:
-                return "今は相手そのものより、不安に引っぱられて判断しやすい流れがあります。"
-            if risk_score > 0.72:
-                return "答えを急ぎすぎると、縁の輪郭が見えにくくなりやすい時です。"
-            return "縁そのものは閉じていませんが、押し方を誤ると細くなりやすい気配があります。"
-
-        if topic == "work":
-            if risk_score > 0.72:
-                return "今は努力不足というより、消耗の蓄積が判断を鈍らせやすい時です。"
-            if noise_score > 0.72:
-                return "問題そのものより、疲れが状況を重く見せている部分があります。"
-            return "状況は固まって見えても、見方を変えると出口はまだ残っています。"
-
-        if risk_score > 0.72:
-            return "相手や環境よりも、心の疲れが関係の見え方をゆがめやすい時です。"
-        return "今の関係は、切れるというより距離の取り方で形が変わる可能性があります。"
-
-    def action_guidance(self, action_label: str) -> str:
-        mapping = {
-            "wait": "今は結論を急ぐより、ひとつだけ整えてから次を見る方が流れに合っています。",
-            "move": "完全に止まるより、小さく動いた方が流れに噛み合いやすいです。",
-            "rest": "まず心と体の消耗を落とすことが先です。休むこと自体が流れを戻します。",
-            "soft_contact": "強く押すより、やわらかく気配を見せるくらいがちょうどいい時です。",
-            "distance": "無理につなぐより、少し距離を置いた方が本当の輪郭が見えやすくなります。",
-        }
-        return mapping.get(action_label, "今は急いで答えを取りにいくより、自分の内側を整える方が次につながります。")
-
-    def build_message(self, topic: str, scores: Dict[str, float], is_paid: bool = False) -> str:
-        action_score = scores["action_score"]
-        risk_score = scores["risk_score"]
-        noise_score = scores["noise_score"]
-        action_label = scores["best_action"]
-
-        opening_map = {
-            "love": "今の恋の流れには、少し霧があります。",
-            "work": "今の仕事の流れは、静かに形を変え始めています。",
-            "relationship": "今の縁は、切れるというより揺れている状態です。",
-        }
-
-        opening = opening_map.get(topic, "今の流れは、静かに揺れています。")
-        phase = self.score_to_phase(action_score, risk_score)
-        warning = self.risk_to_warning(topic, risk_score, noise_score)
-        guidance = self.action_guidance(action_label)
-
-        tail = (
-            "見えるものだけで決めるより、まだ見えていない流れごと受け取った方が道はきれいにつながります。"
-            if is_paid
-            else
-            "無理に未来を掴みにいくより、流れの癖を見抜いた者から道は開きます。"
-        )
-
-        return (
-            f"{opening}\n\n"
-            f"今のあなたは、{phase}\n"
-            f"{warning}\n"
-            f"{guidance}\n\n"
-            f"{tail}"
-        )
-
+    @classmethod
+    def get_month_pillar(cls, year_kan: str, solar_long: float) -> str:
+        """太陽黄経(節切り)と五虎遁法による月柱の特定"""
+        # 節入り(立春=315度)からの月インデックス
+        month_idx = int((solar_long - 315) % 360 / 30)
+        start_kan_map = {"甲": 2, "己": 2, "乙": 4, "庚": 4, "丙": 6, "辛": 6, "丁": 8, "壬": 8, "戊": 0, "癸": 0}
+        start_kan_idx = start_kan_map.get(year_kan[0], 0)
+        month_kan = cls.JUKKAN[(start_kan_idx + month_idx) % 10]
+        month_shi = cls.JUNISHI[(month_idx + 2) % 12]
+        return month_kan + month_shi
 
 class OracleEngine:
-    def __init__(self, state: EngineState):
-        self.state = state
-        self.topic_classifier = TopicClassifier()
-        self.revelation_engine = RevelationEngine()
+    def __init__(self, gemini_client):
+        self.genai_client = gemini_client
+        self.cal = PreciseCalendar()
 
-    def identity_layer(self, user_profile: Dict[str, Any]) -> Dict[str, float]:
-        return {
-            "resilience": float(user_profile.get("resilience", 0.55)),
-            "sensitivity": float(user_profile.get("sensitivity", 0.70)),
-            "patience": float(user_profile.get("patience", 0.45)),
-        }
+    def _calc_julian_day(self, y: int, m: int, d: int, h: int, mn: int, lng: float = 135.0) -> float:
+        """地方時補正(真太陽時への近似)を含むユリウス日計算"""
+        # 経度による時差補正 (1度あたり4分)
+        corrected_h = h + (mn / 60.0) + (lng - 135.0) * (4.0 / 60.0)
+        if m <= 2:
+            y -= 1
+            m += 12
+        a = math.floor(y / 100)
+        b = 2 - a + math.floor(a / 4)
+        jd = math.floor(365.25 * (y + 4716)) + math.floor(30.6001 * (m + 1)) + d + (corrected_h / 24.0) + b - 1524.5
+        return jd
 
-    def temporal_layer(self, horizon: str) -> Dict[str, float]:
-        horizon_map = {
-            "today": 0.55,
-            "3days": 0.58,
-            "week": 0.64,
-            "month": 0.68,
-        }
-        return {"time_openness": horizon_map.get(horizon, 0.55)}
+    def generate_raw_observations(self, profile: dict, motif_id: str) -> dict:
+        """7つの占術データを物理・統計・直感から生成"""
+        y, m, d = profile['birth_year'], profile['birth_month'], profile['birth_day']
+        h, mn = profile.get('birth_hour', 12), profile.get('birth_min', 0)
+        lng = profile.get('longitude', 135.0)
 
-    def symbolic_layer(self, user_profile: Dict[str, Any]) -> Dict[str, float]:
-        birth_year = int(user_profile.get("birth_year", 1990))
-        birth_month = int(user_profile.get("birth_month", 6))
-        birth_day = int(user_profile.get("birth_day", 15))
+        jd = self._calc_julian_day(y, m, d, h, mn, lng)
+        solar_long = self.cal.get_solar_longitude(jd)
+        
+        # 1. 四柱推命 (精密節切り判定)
+        day_pillar = self.cal.get_sexagenary_cycle(jd)
+        year_idx = (y - 4) % 60
+        year_pillar = self.cal.JUKKAN[year_idx % 10] + self.cal.JUNISHI[year_idx % 12]
+        month_pillar = self.cal.get_month_pillar(year_pillar, solar_long)
 
-        astrology_flux = 0.40 + ((birth_month % 6) * 0.07)
-        bazi_stability = 0.35 + (((birth_day + 2) % 7) * 0.07)
-        kyusei_motion = 0.38 + (((birth_year + birth_month + birth_day) % 9) * 0.045)
+        # 2. 九星気学 (本命星)
+        kigaku_idx = (12 - (y % 9)) % 9 # 簡易計算式
+        kigaku = self.cal.KIGAKU_LIST[kigaku_idx]
 
-        total_weight = (
-            self.state.method_weights["astrology"]
-            + self.state.method_weights["bazi"]
-            + self.state.method_weights["kyusei"]
-        )
+        # 3. 宿曜 (月の離角近似)
+        # 月の平均公転周期を用いた宿曜特定
+        moon_jd_base = 2451550.1 # 2000年新月付近
+        moon_period = 27.321661
+        sukuyo_idx = int(((jd - moon_jd_base) % moon_period) / moon_period * 27)
+        sukuyo = self.cal.SUKUYO_LIST[sukuyo_idx % 27]
 
-        symbolic_balance = (
-            astrology_flux * self.state.method_weights["astrology"]
-            + bazi_stability * self.state.method_weights["bazi"]
-            + kyusei_motion * self.state.method_weights["kyusei"]
-        ) / total_weight
+        # 4. ユーザーの直感をシードにした「易」と「タロット」
+        seed_str = f"{jd}{motif_id}{y}{m}{d}"
+        seed_hash = hashlib.sha256(seed_str.encode()).hexdigest()
+        seed_int = int(seed_hash, 16)
 
-        birth_signature = ((birth_year % 10) * 0.03) + ((birth_month % 4) * 0.04) + ((birth_day % 5) * 0.03)
-        symbolic_balance = min(symbolic_balance + birth_signature, 1.0)
-
-        return {
-            "astrology_flux": astrology_flux,
-            "bazi_stability": bazi_stability,
-            "kyusei_motion": kyusei_motion,
-            "symbolic_balance": symbolic_balance,
-        }
-
-    def context_layer(self, context_feats: Dict[str, Any]) -> Dict[str, float]:
-        stress = float(context_feats.get("stress", 0.5))
-        sleep_deficit = float(context_feats.get("sleep_deficit", 0.5))
-        loneliness = float(context_feats.get("loneliness", 0.5))
-        urgency = float(context_feats.get("urgency", 0.5))
-
-        risk_score = (
-            stress * 0.35
-            + sleep_deficit * 0.25
-            + loneliness * 0.20
-            + urgency * 0.20
-        ) * self.state.layer_weights["context"]
-
-        risk_score = max(0.0, min(risk_score, 1.0))
-        return {
-            "risk_score": risk_score,
-            "stress": stress,
-            "sleep_deficit": sleep_deficit,
-            "loneliness": loneliness,
-            "urgency": urgency,
-        }
-
-    def memory_layer(self, memory: Dict[str, Any]) -> Dict[str, float]:
-        repeat_count = int(memory.get("repeat_count", 1))
-        volatility = float(memory.get("volatility", 0.55))
-        repeat_pressure = min(repeat_count / 10.0, 1.0)
-        return {
-            "repeat_pressure": repeat_pressure,
-            "volatility": volatility,
-        }
-
-    def branch_layer(
-        self,
-        topic: str,
-        identity: Dict[str, float],
-        temporal: Dict[str, float],
-        symbolic: Dict[str, float],
-        context: Dict[str, float],
-        memory: Dict[str, float],
-    ) -> Dict[str, float]:
-        resilience = identity["resilience"]
-        sensitivity = identity["sensitivity"]
-        patience = identity["patience"]
-        time_openness = temporal["time_openness"]
-        symbolic_balance = symbolic["symbolic_balance"]
-        risk_score = context["risk_score"]
-        urgency = context["urgency"]
-        repeat_pressure = memory["repeat_pressure"]
-        volatility = memory["volatility"]
-
-        action_score = (
-            resilience * 0.22
-            + patience * 0.18
-            + time_openness * 0.16
-            + symbolic_balance * 0.22
-            + (1.0 - risk_score) * 0.22
-        )
-
-        noise_score = (
-            sensitivity * 0.30
-            + urgency * 0.25
-            + volatility * 0.25
-            + repeat_pressure * 0.20
-        )
-
-        action_score = max(0.0, min(action_score, 1.0))
-        noise_score = max(0.0, min(noise_score, 1.0))
-
-        if risk_score > 0.76:
-            best_action = "rest"
-        elif topic == "love" and noise_score > 0.68:
-            best_action = "wait"
-        elif topic == "love" and action_score > 0.62:
-            best_action = "soft_contact"
-        elif topic == "work" and risk_score > 0.62:
-            best_action = "wait"
-        elif topic == "relationship" and noise_score > 0.65:
-            best_action = "distance"
-        elif action_score > 0.66:
-            best_action = "move"
-        else:
-            best_action = "wait"
+        eki_num = (seed_int % 64) + 1
+        tarot_list = ["魔術師", "女教皇", "女帝", "皇帝", "教皇", "恋人", "戦車", "正義", "隠者", "運命の輪", "力", "吊るされた男", "死神", "節制", "悪魔", "塔", "星", "月", "太陽", "審判", "世界", "愚者"]
+        tarot_card = tarot_list[seed_int % 22]
 
         return {
-            "action_score": round(action_score, 3),
-            "risk_score": round(risk_score, 3),
-            "noise_score": round(noise_score, 3),
-            "best_action": best_action,
+            "observation_point": {
+                "four_pillars": {"year": year_pillar, "month": month_pillar, "day": day_pillar},
+                "sukuyo": sukuyo,
+                "kigaku": kigaku,
+                "solar_longitude": f"{solar_long:.2f}°",
+                "iching": f"第{eki_num}卦",
+                "tarot": tarot_card,
+                "selected_motif": motif_id
+            }
         }
 
-    def build_summary(self, topic: str, scores: Dict[str, float]) -> Dict[str, str]:
-        action_score = scores["action_score"]
-        risk_score = scores["risk_score"]
+    def predict(self, user_profile: dict, context_feats: dict, user_text: str, motif_id: str) -> dict:
+        """生データから『識』の神託を生成"""
+        raw = self.generate_raw_observations(user_profile, motif_id)
+        obs = raw["observation_point"]
 
-        phase = self.revelation_engine.score_to_phase(action_score, risk_score)
-        risk_hint = self.revelation_engine.risk_to_warning(topic, risk_score, scores["noise_score"])
-        action_hint = self.revelation_engine.action_guidance(scores["best_action"])
+        # 識へのシステムプロンプト (人格の注入)
+        # ※この部分は次のステップでさらに強化可能
+        prompt = f"""
+あなたは運命観測者『識（SHIKI）』。
+以下の観測事実を読み解き、一つの統合された神託を授けよ。
 
-        if topic == "love":
-            core_meaning = "不安が強くなるほど、相手そのものより自分の揺れに引っぱられやすい流れです。"
-            metaphor = "霧"
-            oracle_phase = "縁の輪郭が曇りやすい時期"
-        elif topic == "work":
-            core_meaning = "努力不足というより、疲れの蓄積が判断を重くしている流れです。"
-            metaphor = "重い潮流"
-            oracle_phase = "整え直しの時期"
-        else:
-            core_meaning = "関係そのものより、距離や受け取り方で見え方が変わりやすい流れです。"
-            metaphor = "揺れる水面"
-            oracle_phase = "関係の再調整期"
+【観測事実】
+- 四柱干支: {obs['four_pillars']['year']}年 {obs['four_pillars']['month']}月 {obs['four_pillars']['day']}日生まれ
+- 宿曜: {obs['sukuyo']} / 九星: {obs['kigaku']}
+- 太陽黄経: {obs['solar_longitude']}
+- 刻の兆し: 易{obs['iching']} / タロット「{obs['tarot']}」
+- ユーザーが選んだ象徴: {obs['selected_motif']}
 
-        return {
-            "phase": phase,
-            "core_meaning": core_meaning,
-            "action_hint": action_hint,
-            "risk_hint": risk_hint,
-            "oracle_metaphor": metaphor,
-            "oracle_phase": oracle_phase,
-        }
+【ユーザーの現状】
+{user_text}
 
-    def predict(
-        self,
-        user_profile: Dict[str, Any],
-        context_feats: Dict[str, Any],
-        user_text: str,
-        horizon: str = "today",
-        memory: Dict[str, Any] | None = None,
-        is_paid: bool = False,
-    ) -> Dict[str, Any]:
-        if memory is None:
-            memory = {}
-
-        topic = self.topic_classifier.classify(user_text)
-
-        identity = self.identity_layer(user_profile)
-        temporal = self.temporal_layer(horizon)
-        symbolic = self.symbolic_layer(user_profile)
-        context = self.context_layer(context_feats)
-        memory_scores = self.memory_layer(memory)
-
-        scores = self.branch_layer(
-            topic=topic,
-            identity=identity,
-            temporal=temporal,
-            symbolic=symbolic,
-            context=context,
-            memory=memory_scores,
-        )
-
-        message = self.revelation_engine.build_message(topic=topic, scores=scores, is_paid=is_paid)
-        summary = self.build_summary(topic=topic, scores=scores)
-
-        self.state.samples += 1
-
-        return {
-            "topic": topic,
-            "scores": scores,
-            "message": message,
-            "summary": summary,
-            "engine_version": "ORACLE-v2.1-relation-aware",
-        }
+【制約】
+- 占術名は出すな。
+- ユーザーが選んだ「{obs['selected_motif']}」が運命の鍵となったことを冒頭で触れよ。
+- 威厳のある神秘的な口調を維持せよ。
+"""
+        try:
+            # Gemini 2.0 Flash を使用して高速かつ高精度な人格生成
+            response = self.genai_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
+            return {
+                "message": response.text,
+                "summary": {"core_meaning": "観測完了"}, 
+                "topic": "general"
+            }
+        except Exception as e:
+            return {"message": "識の視界が一時的に曇りました。時間を置いてください。", "summary": {}, "topic": "error"}
