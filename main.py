@@ -41,7 +41,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 if not LINE_CHANNEL_ACCESS_TOKEN:
     raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
@@ -73,10 +73,10 @@ db = firestore.client()
 # -------------------------
 # エンジン初期化
 # -------------------------
-# 宿曜は厳密計算ではないためデフォルトOFF
 oracle_engine = OracleEngine(
-    genai_client,
-    include_approx_sukuyo=False
+    genai_client=genai_client,
+    include_approx_sukuyo=False,
+    model_name=GEMINI_MODEL,
 )
 
 # -------------------------
@@ -146,10 +146,6 @@ def build_user_profile(user_data: dict) -> dict:
 
 
 def build_base_context(user_data: dict) -> dict:
-    """
-    基礎文脈。
-    必要に応じて Firestore 上の気分/状態をここに足していける。
-    """
     return {
         "stress": user_data.get("stress", 0.5),
         "urgency": user_data.get("urgency", 0.5),
@@ -163,7 +159,7 @@ def slots_to_context(base: dict, slots: Optional[dict]) -> dict:
 def build_reading_reply(
     user_data: dict,
     active_text: str,
-    known_slots: Optional[dict]
+    known_slots: Optional[dict],
 ) -> Tuple[str, dict, dict]:
     profile = build_user_profile(user_data)
     context = slots_to_context(build_base_context(user_data), known_slots)
@@ -179,11 +175,9 @@ def build_reading_reply(
 
     reply_text = result.get("message", "……識の声は、いまはまだ遠いようです。")
 
-    # 生年月日未登録なら案内を足す
     if not user_data.get("birth_date"):
         reply_text += "\n\n……生まれた日の刻印を預ければ、より深く観測できるでしょう。"
 
-    # 出生時刻未登録なら軽く補足
     if user_data.get("birth_date") and user_data.get("birth_hour") in (None, ""):
         reply_text += "\n\n……生まれた時刻までわかれば、観測はさらに深く澄みます。"
 
@@ -199,6 +193,7 @@ async def healthz():
         "ok": True,
         "app": "SHIKI LINE Bot",
         "time": datetime.now(timezone.utc).isoformat(),
+        "model": GEMINI_MODEL,
     }
 
 
@@ -237,7 +232,9 @@ def handle_text_message(event: MessageEvent):
         try:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text="……ことばがまだ届いていないようです。もう一度、静かに問いを送ってください。")
+                TextSendMessage(
+                    text="……ことばがまだ届いていないようです。もう一度、静かに問いを送ってください。"
+                )
             )
         except Exception:
             logger.exception("Empty text reply failed")
@@ -265,7 +262,7 @@ def handle_text_message(event: MessageEvent):
             TextSendMessage(text=reply)
         )
 
-    except Exception as e:
+    except Exception:
         logger.exception("handle_text_message error")
 
         fallback = "……識の視界が一時的に揺らぎました。少しだけ間を置いて、もう一度問いかけてください。"
