@@ -1,3 +1,4 @@
+import os
 import math
 import hashlib
 import logging
@@ -29,7 +30,7 @@ class PreciseCalendar:
     - 日柱: 基準甲子日からJDNで算出
     - 時柱: 日干 + 時支で算出
     - 九星: 年盤の本命星を立春基準で算出
-    - 宿曜: 厳密計算に必要な要素を省くため strict では未使用
+    - 宿曜: 厳密計算ではないためデフォルトOFF
     """
 
     JUKKAN = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"]
@@ -45,9 +46,8 @@ class PreciseCalendar:
     ]
 
     # 1984-02-02 を甲子日基準として採用
-    # floor(JD + 0.5) に対応するJDN整数
     SEXAGENARY_DAY_BASE_JDN = 2445733
-    SEXAGENARY_DAY_BASE_INDEX = 0  # 甲子=0
+    SEXAGENARY_DAY_BASE_INDEX = 0
 
     @staticmethod
     def julian_day(
@@ -59,13 +59,7 @@ class PreciseCalendar:
         second: int = 0,
         longitude: float = 135.0,
     ) -> float:
-        """
-        地方平均太陽時寄りの補正を軽く入れたJD計算。
-        入力は日本の現地時刻を想定。
-        """
         local_hour = hour + minute / 60.0 + second / 3600.0
-
-        # 東経135°基準からの地方時補正（1度=4分）
         corrected_hour = local_hour + (longitude - 135.0) * (4.0 / 60.0)
 
         y = year
@@ -89,10 +83,6 @@ class PreciseCalendar:
 
     @staticmethod
     def solar_longitude(jd: float) -> float:
-        """
-        太陽黄経の近似計算（Meeus系の簡略式）。
-        節入り判定用途としては十分実用的。
-        """
         T = (jd - 2451545.0) / 36525.0
 
         L0 = (
@@ -124,9 +114,6 @@ class PreciseCalendar:
 
     @classmethod
     def effective_year_by_setsu(cls, birth_year: int, solar_long: float) -> int:
-        """
-        立春（315°）前なら前年扱い
-        """
         return birth_year if solar_long >= 315.0 else birth_year - 1
 
     @classmethod
@@ -137,43 +124,27 @@ class PreciseCalendar:
 
     @classmethod
     def month_index_from_solar_longitude(cls, solar_long: float) -> int:
-        """
-        寅月を0として 315°(立春) 起点に30°ごと
-        寅=0, 卯=1, ... , 丑=11
-        """
         return int(((solar_long - 315.0) % 360.0) // 30.0)
 
     @classmethod
     def month_pillar(cls, year_stem: str, solar_long: float) -> str:
-        """
-        月柱:
-        年干ごとの寅月天干起点を使用
-        甲己 -> 丙寅
-        乙庚 -> 戊寅
-        丙辛 -> 庚寅
-        丁壬 -> 壬寅
-        戊癸 -> 甲寅
-        """
         month_idx = cls.month_index_from_solar_longitude(solar_long)
 
         start_kan_map = {
-            "甲": 2, "己": 2,  # 丙
-            "乙": 4, "庚": 4,  # 戊
-            "丙": 6, "辛": 6,  # 庚
-            "丁": 8, "壬": 8,  # 壬
-            "戊": 0, "癸": 0,  # 甲
+            "甲": 2, "己": 2,
+            "乙": 4, "庚": 4,
+            "丙": 6, "辛": 6,
+            "丁": 8, "壬": 8,
+            "戊": 0, "癸": 0,
         }
 
         start_stem_idx = start_kan_map[year_stem]
         stem = cls.JUKKAN[(start_stem_idx + month_idx) % 10]
-        branch = cls.JUNISHI[(2 + month_idx) % 12]  # 寅始まり
+        branch = cls.JUNISHI[(2 + month_idx) % 12]
         return stem + branch
 
     @classmethod
     def sexagenary_day_index(cls, jd: float) -> int:
-        """
-        日柱用の干支インデックス
-        """
         jdn = int(math.floor(jd + 0.5))
         return (jdn - cls.SEXAGENARY_DAY_BASE_JDN + cls.SEXAGENARY_DAY_BASE_INDEX) % 60
 
@@ -184,28 +155,16 @@ class PreciseCalendar:
 
     @classmethod
     def hour_branch_index(cls, hour: int) -> int:
-        """
-        子時 23:00-00:59
-        丑時 01:00-02:59 ...
-        """
         return ((hour + 1) // 2) % 12
 
     @classmethod
     def hour_pillar(cls, day_stem: str, hour: int) -> str:
-        """
-        時柱:
-        甲己日 -> 甲子始まり
-        乙庚日 -> 丙子始まり
-        丙辛日 -> 戊子始まり
-        丁壬日 -> 庚子始まり
-        戊癸日 -> 壬子始まり
-        """
         start_map = {
-            "甲": 0, "己": 0,  # 甲
-            "乙": 2, "庚": 2,  # 丙
-            "丙": 4, "辛": 4,  # 戊
-            "丁": 6, "壬": 6,  # 庚
-            "戊": 8, "癸": 8,  # 壬
+            "甲": 0, "己": 0,
+            "乙": 2, "庚": 2,
+            "丙": 4, "辛": 4,
+            "丁": 6, "壬": 6,
+            "戊": 8, "癸": 8,
         }
 
         hb_idx = cls.hour_branch_index(hour)
@@ -216,9 +175,6 @@ class PreciseCalendar:
 
     @classmethod
     def nine_star_year(cls, effective_year: int) -> str:
-        """
-        九星気学の本命星（年盤）を立春基準で算出
-        """
         star_num = 11 - (effective_year % 9)
         while star_num > 9:
             star_num -= 9
@@ -228,9 +184,6 @@ class PreciseCalendar:
 
     @classmethod
     def sukuyo_approx(cls, jd: float) -> str:
-        """
-        参考用の簡易近似。厳密宿曜ではない。
-        """
         idx = int((((jd - 2451550.1) % 27.32166) / 27.32166) * 27) % 27
         return cls.SUKUYO_LIST[idx]
 
@@ -284,27 +237,22 @@ class PreciseCalendar:
 
 
 class OracleEngine:
-    """
-    精度重視版 OracleEngine
-
-    改善点:
-    - 年柱・月柱・九星を節切り基準
-    - 日柱基準を明示
-    - 時柱対応
-    - 宿曜は厳密でない限り省略可能
-    - Geminiレスポンスの安全取得
-    """
-
     TAROT_LIST = [
         "愚者", "魔術師", "女教皇", "女帝", "皇帝", "教皇", "恋人",
         "戦車", "力", "隠者", "運命の輪", "正義", "吊るされた男",
         "死神", "節制", "悪魔", "塔", "星", "月", "太陽", "審判", "世界"
     ]
 
-    def __init__(self, gemini_client, include_approx_sukuyo: bool = False):
+    def __init__(
+        self,
+        gemini_client,
+        include_approx_sukuyo: bool = False,
+        model_name: Optional[str] = None,
+    ):
         self.genai_client = gemini_client
         self.cal = PreciseCalendar()
         self.include_approx_sukuyo = include_approx_sukuyo
+        self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     @staticmethod
     def _stable_seed(
@@ -433,7 +381,7 @@ class OracleEngine:
             )
 
             response = self.genai_client.models.generate_content(
-                model="models/gemini-1.5-flash",
+                model=self.model_name,
                 contents=prompt,
             )
             message = self._safe_text(response)
@@ -450,6 +398,7 @@ class OracleEngine:
                 "sukuyo": pillars.sukuyo,
                 "eki_num": eki_num,
                 "tarot": tarot,
+                "model_name": self.model_name,
             }
 
             return {
@@ -469,46 +418,15 @@ class OracleEngine:
                     "topic": "error",
                 }
 
+            if "404" in error_msg or "NOT_FOUND" in error_msg:
+                return {
+                    "message": "……観測の呼び声が、いまの天の系統と噛み合っていないようです。しばし整えますゆえ、もう一度問いかけてください。――識より",
+                    "summary": {},
+                    "topic": "error",
+                }
+
             return {
                 "message": f"識の視界が一時的に曇りました（{error_msg[:80]}...）",
                 "summary": {},
                 "topic": "error",
             }
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    class DummyResponse:
-        def __init__(self, text: str):
-            self.text = text
-
-    class DummyModels:
-        @staticmethod
-        def generate_content(model: str, contents: str):
-            return DummyResponse(f"[{model}] {contents[:180]}...")
-
-    class DummyGeminiClient:
-        models = DummyModels()
-
-    engine = OracleEngine(DummyGeminiClient(), include_approx_sukuyo=False)
-
-    result = engine.predict(
-        user_profile={
-            "birth_year": 1992,
-            "birth_month": 2,
-            "birth_day": 3,
-            "birth_hour": 23,
-            "birth_minute": 40,
-            "birth_longitude": 139.6917,
-        },
-        context_feats={
-            "mood": "揺れている",
-            "focus": "仕事と今後の流れ",
-        },
-        user_text="これから数ヶ月、私はどの選択を優先すべきか。",
-        motif_id="月影の鍵",
-    )
-
-    print("summary =", result["summary"])
-    print("message =", result["message"])
