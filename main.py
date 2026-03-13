@@ -74,7 +74,7 @@ db = firestore.client()
 # エンジン初期化
 # -------------------------
 oracle_engine = OracleEngine(
-    genai_client=genai_client,
+    gemini_client=genai_client,
     include_approx_sukuyo=False,
     model_name=GEMINI_MODEL,
 )
