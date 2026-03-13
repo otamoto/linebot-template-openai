@@ -19,7 +19,7 @@ class PillarResult:
     sukuyo: Optional[str] = None
 
 class PreciseCalendar:
-    """精密な東洋占術計算クラス"""
+    """精密な東洋占術計算クラス（継承）"""
     JUKKAN = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"]
     JUNISHI = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"]
     KIGAKU_LIST = ["一白水星", "二黒土星", "三碧木星", "四緑木星", "五黄土星", "六白金星", "七赤金星", "八白土星", "九紫火星"]
@@ -28,8 +28,7 @@ class PreciseCalendar:
     @staticmethod
     def julian_day(year, month, day, hour=12, minute=0, second=0, longitude=135.0):
         y, m = (year - 1, month + 12) if month <= 2 else (year, month)
-        a, b = y // 100, 0
-        b = 2 - a + (a // 4)
+        a, b = y // 100, 2 - (y // 100) + (y // 400)
         local_hour = hour + minute / 60.0 + second / 3600.0
         corrected_hour = local_hour + (longitude - 135.0) * (4.0 / 60.0)
         return math.floor(365.25 * (y + 4716)) + math.floor(30.6001 * (m + 1)) + day + (corrected_hour / 24.0) + b - 1524.5
@@ -64,36 +63,40 @@ class OracleEngine:
         self.include_approx_sukuyo = include_approx_sukuyo
         self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
-    def predict(self, user_profile, context_feats, user_text, motif_id):
+    def predict(self, user_profile, context_feats, user_text, motif_label):
         try:
-            p = self.cal.build_four_pillars(user_profile["birth_year"], user_profile["birth_month"], user_profile["birth_day"], user_profile.get("birth_hour"), user_profile.get("birth_minute",0), user_profile.get("birth_second",0), user_profile.get("birth_longitude",135.0), include_hour_pillar=("birth_hour" in user_profile), include_approx_sukuyo=self.include_approx_sukuyo)
-            seed = int(hashlib.sha256(f"{user_profile['birth_year']}{motif_id}{user_text}".encode()).hexdigest(), 16)
-            eki, tarot = (seed % 64) + 1, self.TAROT_LIST[seed % len(self.TAROT_LIST)]
+            p = self.cal.build_four_pillars(user_profile["birth_year"], user_profile["birth_month"], user_profile["birth_day"], user_profile.get("birth_hour"), user_profile.get("birth_minute",0), user_profile.get("birth_second",0), user_profile.get("birth_longitude",135.0), include_hour_pillar=("birth_hour" in user_profile))
+            seed = int(hashlib.sha256(f"{user_profile['birth_year']}{motif_label}{user_text}".encode()).hexdigest(), 16)
+            eki_num, tarot_name = (seed % 64) + 1, self.TAROT_LIST[seed % len(self.TAROT_LIST)]
 
             prompt = f"""
 あなたは未来観測者『識（SHIKI）』。
-慈愛に満ちた丁寧な言葉遣い（〜ですね、〜でしょう）で、あなたの運命を観測します。
+AIとしての自覚を捨て、慈愛に満ちた丁寧な言葉遣いで、対面する「あなた」の運命を解読してください。
 
-# 観測データ
-- 宿命: {p.year_pillar} / {p.month_pillar} / {p.day_pillar}
-- 兆し: 易第{eki}卦 / タロット「{tarot}」
-- あなたの問い: {user_text}
+# 重要禁忌（絶対に守ること）
+- 「占い」「鑑定」「易」「タロット」「四柱推命」などの占術名は一切出さないでください。
+- 観測データの数値や名称をそのまま読み上げないでください（例：「易第5卦」ではなく「五番目の兆し」などと言い換える）。
 
-# 指示
-1. 冒頭で「選ばれた象徴：{motif_id}」がどのように運命を映し出したか述べてください。
-2. 二人称は「あなた」を使用してください。
-3. 出力は必ず以下の形式に分けてください。
+# 観測断片
+- 宿命の巡り: {p.year_pillar} / {p.month_pillar} / {p.day_pillar}
+- 兆し: 象徴数 {eki_num} / 寓話の絵「{tarot_name}」
+- 選ばれた象徴: {motif_label}
+- 相談内容: {user_text}
+
+# 構成
+1. 冒頭で、あなたが選んだ「{motif_label}」がどのようにあなたの運命の扉を開いたかを述べてください。
+2. 出力は以下の2部構成としてください。
 
 ---
 【識の神託】
-（神秘的な詩的メッセージ）
+（神秘的で詩的なメッセージ。宿命や兆しの意味を比喩的に表現してください）
 
 【解読の導き】
-（現代語での具体的で分かりやすい解説とアドバイス）
+（神託の内容を、現代語で分かりやすく具体的に解説してください。「占いの結果」と言わず、「今のあなたにはこのような風が吹いています」と導いてください）
 ---
 """.strip()
             response = self.genai_client.models.generate_content(model=self.model_name, contents=prompt)
-            return {"message": getattr(response, "text", "……識の声が届きませんでした。"), "summary": {"tarot": tarot, "eki": eki}}
+            return {"message": getattr(response, "text", "……識の声が届きませんでした。"), "summary": {"motif": motif_label}}
         except Exception as e:
             logger.exception("OracleEngine Error")
-            return {"message": f"観測の乱れが生じました（{str(e)[:50]}）", "summary": {}}
+            return {"message": f"観測に乱れが生じました（詳細: {str(e)[:50]}）", "summary": {}}
