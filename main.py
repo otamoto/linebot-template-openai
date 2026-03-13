@@ -13,7 +13,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, 
     QuickReply, QuickReplyButton, MessageAction, PostbackAction,
-    DatetimePickerAction, TemplateSendMessage, ButtonsTemplate
+    DatetimePickerAction, TemplateSendMessage, ButtonsTemplate, PostbackEvent
 )
 from linebot.exceptions import InvalidSignatureError
 from google import genai
@@ -59,11 +59,13 @@ def build_user_profile(user_data: dict) -> dict:
     bd = user_data.get("birth_date", "1990-01-01")
     y, m, d = map(int, bd.split("-"))
     profile = {"birth_year": y, "birth_month": m, "birth_day": d}
+    if user_data.get("birth_hour") is not None:
+        profile["birth_hour"] = int(user_data["birth_hour"])
+        profile["birth_minute"] = int(user_data.get("birth_minute", 0))
     return profile
 
-# カレンダーUI（生年月日選択ボタン）を送る関数
+# ツール表示関数
 def send_birthday_picker(user_id: str, message: str):
-    # Datetime Picker Action を設定
     date_picker = ButtonsTemplate(
         text=message,
         actions=[
@@ -71,16 +73,29 @@ def send_birthday_picker(user_id: str, message: str):
                 label="カレンダーで選択",
                 data="action=set_birthday",
                 mode="date",
-                initial="1995-01-01",
-                max="2026-12-31",
-                min="1900-01-01"
+                initial="1995-01-01"
             )
         ]
     )
-    line_bot_api.push_message(user_id, TemplateSendMessage(alt_text="生年月日を選択してください", template=date_picker))
+    line_bot_api.push_message(user_id, TemplateSendMessage(alt_text="生年月日を選択", template=date_picker))
+
+def send_time_picker(user_id: str):
+    time_picker = ButtonsTemplate(
+        text="生まれた「時刻」も分かりますか？より詳細な観測が可能になります。",
+        actions=[
+            DatetimePickerAction(
+                label="時刻を選択する",
+                data="action=set_birthtime",
+                mode="time",
+                initial="12:00"
+            ),
+            PostbackAction(label="分からない", data="action=set_birthtime_unknown")
+        ]
+    )
+    line_bot_api.push_message(user_id, TemplateSendMessage(alt_text="出生時間を選択", template=time_picker))
 
 # メイン返信ロジック
-def process_and_push_reply(user_id: str, user_text: str, motif_id: Optional[str] = None, selected_date: Optional[str] = None) -> None:
+def process_and_push_reply(user_id: str, user_text: str, motif_id: Optional[str] = None, selected_date: Optional[str] = None, selected_time: Optional[str] = None) -> None:
     try:
         user_ref = db.collection("users").document(user_id)
         user_data = user_ref.get().to_dict() or {}
@@ -91,13 +106,25 @@ def process_and_push_reply(user_id: str, user_text: str, motif_id: Optional[str]
             send_birthday_picker(user_id, "すべての記録を虚空へ返しました。新たな観測を始めましょう。あなたの生まれた日はいつですか？")
             return
 
-        # 2. 生年月日が未登録の場合
+        # 2. プロフィール登録フロー
         if not user_data.get("birth_date"):
-            if selected_date: # Postbackからの日付入力
+            if selected_date:
                 user_ref.set({"birth_date": selected_date}, merge=True)
-                line_bot_api.push_message(user_id, TextSendMessage(text=f"{selected_date}……。あなたの刻印を受け取りました。次に、今あなたが一番視たいことを教えてください。"))
+                send_time_picker(user_id)
             else:
                 send_birthday_picker(user_id, "ようこそ。観測を始める前に、あなたの生まれた日を教えてください。")
+            return
+
+        if user_data.get("birth_hour") is None:
+            if selected_time:
+                h, m = map(int, selected_time.split(":"))
+                user_ref.set({"birth_hour": h, "birth_minute": m}, merge=True)
+                line_bot_api.push_message(user_id, TextSendMessage(text=f"{selected_time}。刻印が完成しました。今、あなたが一番視たいことを教えてください。"))
+            elif user_text == "UNKNOWN_TIME": # Postbackから来る
+                user_ref.set({"birth_hour": 12, "birth_minute": 0}, merge=True) # 不明な場合は正午
+                line_bot_api.push_message(user_id, TextSendMessage(text="承知いたしました。では、日時の重なりを中心に観測します。今、あなたが一番視たいことを教えてください。"))
+            else:
+                send_time_picker(user_id)
             return
 
         # 3. 儀式フェーズ（モチーフ選択）
@@ -119,7 +146,9 @@ def process_and_push_reply(user_id: str, user_text: str, motif_id: Optional[str]
         logger.exception("process_and_push_reply error")
         line_bot_api.push_message(user_id, TextSendMessage(text="識の視界が揺らぎました。少し間を置いてください。"))
 
-# LINE Callback Handler
+# -------------------------
+# LINE Callback & Event Handler
+# -------------------------
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature")
@@ -142,15 +171,19 @@ def handle_postback(event: PostbackEvent):
     user_id = event.source.user_id
     query = dict(x.split('=') for x in event.postback.data.split('&'))
     
-    # モチーフ選択
     if query.get("action") == "select_motif":
-        motif_id = query.get("id")
-        threading.Thread(target=process_and_push_reply, args=(user_id, "", motif_id), daemon=True).start()
+        threading.Thread(target=process_and_push_reply, args=(user_id, "", query.get("id")), daemon=True).start()
     
-    # 日付選択（カレンダーUIからの返り値）
     elif query.get("action") == "set_birthday":
         selected_date = event.postback.params.get("date")
         threading.Thread(target=process_and_push_reply, args=(user_id, "", None, selected_date), daemon=True).start()
+
+    elif query.get("action") == "set_birthtime":
+        selected_time = event.postback.params.get("time")
+        threading.Thread(target=process_and_push_reply, args=(user_id, "", None, None, selected_time), daemon=True).start()
+    
+    elif query.get("action") == "set_birthtime_unknown":
+        threading.Thread(target=process_and_push_reply, args=(user_id, "UNKNOWN_TIME", None, None, None), daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
