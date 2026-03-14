@@ -2,7 +2,7 @@ import os
 import math
 import hashlib
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, List
 
 logger = logging.getLogger(__name__)
@@ -34,21 +34,6 @@ class PillarResult:
 
 
 class PreciseCalendar:
-    """
-    強化版 東洋占術計算クラス
-
-    実装範囲:
-    - 年柱: 立春基準
-    - 月柱: 節入り基準
-    - 日柱
-    - 時柱
-    - 蔵干
-    - 通変星
-    - 十二運
-    - 五行バランス
-    - 九星年命
-    """
-
     JUKKAN = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"]
     JUNISHI = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"]
 
@@ -74,7 +59,6 @@ class PreciseCalendar:
         "申": "金", "酉": "金", "戌": "土", "亥": "水",
     }
 
-    # 蔵干（簡略ではなく一般的な三層構造を採用）
     HIDDEN_STEMS = {
         "子": ["癸"],
         "丑": ["己", "癸", "辛"],
@@ -90,7 +74,6 @@ class PreciseCalendar:
         "亥": ["壬", "甲"],
     }
 
-    # 月令の力の簡易重み
     MONTH_BRANCH_ELEMENT_WEIGHTS = {
         "寅": {"木": 1.8, "火": 1.0, "土": 0.6, "金": 0.4, "水": 0.8},
         "卯": {"木": 2.0, "火": 0.8, "土": 0.5, "金": 0.3, "水": 0.7},
@@ -111,10 +94,8 @@ class PreciseCalendar:
         "六白金星", "七赤金星", "八白土星", "九紫火星"
     ]
 
-    # 1984-02-02 を甲子日基準
     SEXAGENARY_DAY_BASE_JDN = 2445733
 
-    # 十二運 起点表（各日主に対して長生となる支）
     TWELVE_STAGE_START = {
         "甲": "亥", "乙": "午",
         "丙": "寅", "丁": "酉",
@@ -155,9 +136,6 @@ class PreciseCalendar:
 
     @staticmethod
     def solar_longitude(jd: float) -> float:
-        """
-        近似精度を少し高めた太陽黄経
-        """
         T = (jd - 2451545.0) / 36525.0
 
         L0 = (
@@ -262,9 +240,6 @@ class PreciseCalendar:
 
     @classmethod
     def get_tsuhen(cls, day_stem: str, target_stem: str) -> str:
-        """
-        通変星（日干基準）
-        """
         day_el = cls.STEM_ELEMENT[day_stem]
         day_yy = cls.STEM_YINYANG[day_stem]
         tgt_el = cls.STEM_ELEMENT[target_stem]
@@ -298,7 +273,6 @@ class PreciseCalendar:
         start_idx = cls.JUNISHI.index(start_branch)
         target_idx = cls.JUNISHI.index(branch)
 
-        # 陽干は順行、陰干は逆行
         is_yang = cls.STEM_YINYANG[day_stem] == "陽"
 
         if is_yang:
@@ -331,14 +305,12 @@ class PreciseCalendar:
         if hour_pillar:
             pillars.append(hour_pillar)
 
-        # 天干重み
         stem_weights = [1.0, 1.4, 1.2, 0.8] if hour_pillar else [1.0, 1.4, 1.2]
-        # 蔵干重み
         hidden_weights = {
-            0: [0.7, 0.25, 0.15],   # 年
-            1: [1.2, 0.35, 0.2],    # 月
-            2: [0.9, 0.3, 0.15],    # 日
-            3: [0.6, 0.2, 0.1],     # 時
+            0: [0.7, 0.25, 0.15],
+            1: [1.2, 0.35, 0.2],
+            2: [0.9, 0.3, 0.15],
+            3: [0.6, 0.2, 0.1],
         }
 
         for idx, pillar in enumerate(pillars):
@@ -347,7 +319,6 @@ class PreciseCalendar:
             add_stem(stem, stem_weights[idx])
             add_hidden(branch, hidden_weights[idx])
 
-        # 月令補正
         month_branch = month_pillar[1]
         season_weights = cls.MONTH_BRANCH_ELEMENT_WEIGHTS.get(month_branch, {})
         for el, mul in season_weights.items():
@@ -362,9 +333,6 @@ class PreciseCalendar:
         month_pillar: str,
         five_scores: Dict[str, float],
     ) -> str:
-        """
-        簡易 身強弱ヒント
-        """
         dm_element = cls.STEM_ELEMENT[day_stem]
         resource_element = None
         for el, gen in {"木": "火", "火": "土", "土": "金", "金": "水", "水": "木"}.items():
@@ -382,7 +350,6 @@ class PreciseCalendar:
         month_branch = month_pillar[1]
         season_main = cls.BRANCH_ELEMENT_MAIN[month_branch]
 
-        # 月令一致なら少し補正
         if season_main == dm_element:
             ratio += 0.08
         elif resource_element and season_main == resource_element:
@@ -475,12 +442,10 @@ class OracleEngine:
     def __init__(
         self,
         gemini_client,
-        include_approx_sukuyo: bool = False,
         model_name: Optional[str] = None,
     ):
         self.genai_client = gemini_client
         self.cal = PreciseCalendar()
-        self.include_approx_sukuyo = include_approx_sukuyo
         self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     @staticmethod
@@ -521,6 +486,18 @@ class OracleEngine:
                 pass
 
         return "……時の帳がまだ閉じています。"
+
+    @staticmethod
+    def _extract_usage_metadata(response: Any) -> Dict[str, Any]:
+        try:
+            usage = getattr(response, "usage_metadata", None)
+            if usage is None:
+                return {}
+            if hasattr(usage, "__dict__"):
+                return dict(usage.__dict__)
+            return {"raw": str(usage)}
+        except Exception:
+            return {}
 
     def _build_prompt(
         self,
@@ -656,6 +633,7 @@ class OracleEngine:
             )
 
             message = self._safe_text(response)
+            usage_metadata = self._extract_usage_metadata(response)
 
             return {
                 "message": message,
@@ -692,6 +670,7 @@ class OracleEngine:
                     "eki_num": eki_num,
                     "tarot_name": tarot_name,
                     "model_name": self.model_name,
+                    "usage_metadata": usage_metadata,
                 },
                 "topic": "dialogue" if is_dialogue else "oracle",
             }
