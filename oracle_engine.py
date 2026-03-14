@@ -1,705 +1,989 @@
 import os
-import math
-import hashlib
+import json
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
+import threading
+import random
+import re
+import unicodedata
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, List
+from urllib.parse import parse_qsl
+from uuid import uuid4
 
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import (
+    MessageEvent,
+    TextMessage,
+    TextSendMessage,
+    QuickReply,
+    QuickReplyButton,
+    PostbackAction,
+    PostbackEvent,
+    DatetimePickerAction,
+    TemplateSendMessage,
+    ButtonsTemplate,
+)
+from linebot.exceptions import InvalidSignatureError
+
+from openai import OpenAI
+
+import firebase_admin
+from firebase_admin import credentials, firestore
+from firebase_admin.firestore import DELETE_FIELD
+
+from oracle_engine import OracleEngine
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s : %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class PillarResult:
-    year_pillar: str
-    month_pillar: str
-    day_pillar: str
-    hour_pillar: Optional[str]
-    year_hidden_stems: List[str]
-    month_hidden_stems: List[str]
-    day_hidden_stems: List[str]
-    hour_hidden_stems: List[str]
-    year_twelve_stage: str
-    month_twelve_stage: str
-    day_twelve_stage: str
-    hour_twelve_stage: Optional[str]
-    year_tsuhen: str
-    month_tsuhen: str
-    day_tsuhen: str
-    hour_tsuhen: Optional[str]
-    effective_year: int
-    solar_longitude: float
-    nine_star_year: str
-    five_element_scores: Dict[str, float]
-    self_strength_hint: str
+app = FastAPI(title="SHIKI LINE Bot")
 
 
-class PreciseCalendar:
-    JUKKAN = ["甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸"]
-    JUNISHI = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"]
+PHASE_WAIT_NAME = "waiting_name"
+PHASE_WAIT_BIRTH_DATE = "waiting_birth_date"
+PHASE_WAIT_BIRTH_TIME = "waiting_birth_time"
+PHASE_WAIT_PROFILE_CONFIRM = "waiting_profile_confirm"
+PHASE_WAIT_RESTART_CONFIRM = "waiting_restart_confirm"
+PHASE_WAIT_CONSULT_DETAIL = "waiting_consult_detail"
+PHASE_WAIT_MOTIF = "waiting_motif"
+PHASE_DIALOGUE = "dialogue"
+PHASE_WAIT_PAYMENT = "waiting_payment"
 
-    STEM_ELEMENT = {
-        "甲": "木", "乙": "木",
-        "丙": "火", "丁": "火",
-        "戊": "土", "己": "土",
-        "庚": "金", "辛": "金",
-        "壬": "水", "癸": "水",
+DEFAULT_UNKNOWN_HOUR = 12
+DEFAULT_UNKNOWN_MINUTE = 0
+DEFAULT_UNKNOWN_SECOND = 0
+DEFAULT_BIRTH_LONGITUDE = float(os.getenv("DEFAULT_BIRTH_LONGITUDE", "135.0"))
+
+MAX_CHAT_HISTORY_CHARS = 5000
+PROFILE_DEFAULT_NAME = "あなた"
+
+DEFAULT_FREE_SESSIONS = int(os.getenv("DEFAULT_FREE_SESSIONS", "1"))
+PAYMENT_URL = os.getenv("PAYMENT_URL", "https://example.com/payment")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "SHIKI")
+
+ALL_MOTIFS = [
+    "銀の鍵", "砂時計", "古びた鏡", "聖なる滴", "琥珀の蝶", "折れた剣", "青い月", "羅針盤", "封じられた手紙", "金の天秤",
+    "揺れる灯火", "水晶の髑髏", "沈黙の鐘", "茨の冠", "無垢な羽根", "双子の蛇", "星の砂", "錆びた歯車", "輝く聖杯", "黒い薔薇",
+    "白い孔雀", "秘められた林檎", "古の地図", "時の歯車", "深海の真珠", "暁の鳥", "黄昏の雫", "不滅の炎", "氷の心臓", "奏でる竪琴",
+    "空の器", "叡智の梟", "秘密の鍵穴", "約束の指輪", "流れる雲", "不動の岩", "踊る影", "導きの杖", "遮られた眼", "語らぬ仮面"
+]
+
+
+def require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"環境変数 {name} が未設定です")
+    return value
+
+
+LINE_CHANNEL_ACCESS_TOKEN = require_env("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = require_env("LINE_CHANNEL_SECRET")
+OPENAI_API_KEY = require_env("OPENAI_API_KEY")
+FIREBASE_SERVICE_ACCOUNT_JSON = require_env("FIREBASE_SERVICE_ACCOUNT_JSON")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+
+
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+if not firebase_admin._apps:
+    key_dict = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
+    firebase_admin.initialize_app(credentials.Certificate(key_dict))
+
+db = firestore.client()
+oracle_engine = OracleEngine(
+    openai_client=openai_client,
+    model_name=OPENAI_MODEL,
+)
+
+
+_user_locks: Dict[str, threading.Lock] = {}
+_user_locks_guard = threading.Lock()
+
+
+def get_user_lock(user_id: str) -> threading.Lock:
+    with _user_locks_guard:
+        if user_id not in _user_locks:
+            _user_locks[user_id] = threading.Lock()
+        return _user_locks[user_id]
+
+
+def normalize_text(text: str) -> str:
+    return unicodedata.normalize("NFKC", (text or "").strip())
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def trim_history(text: Optional[str], max_chars: int = MAX_CHAT_HISTORY_CHARS) -> str:
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def parse_postback_data(data: str) -> Dict[str, str]:
+    try:
+        return dict(parse_qsl(data, keep_blank_values=True))
+    except Exception:
+        logger.warning("postback parse failed: %s", data)
+        return {}
+
+
+def normalize_yes_no(text: str) -> Optional[str]:
+    t = normalize_text(text).lower()
+    yes_set = {"はい", "うん", "ok", "okay", "yes", "y", "確定", "これでいい", "良い", "よい", "大丈夫"}
+    no_set = {"いいえ", "修正", "やり直す", "違う", "ちがう", "no", "n"}
+    if t in yes_set:
+        return "yes"
+    if t in no_set:
+        return "no"
+    return None
+
+
+def extract_clean_name(text: str) -> str:
+    t = normalize_text(text)
+    t = re.sub(r"(です|と申します|だよ|と申す|だ|といいます|って呼びます|って呼んで)$", "", t).strip()
+    t = re.sub(r"\s+", " ", t)
+    return t[:30] if t else ""
+
+
+def safe_int(value: Any, default: Optional[int] = None) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def build_user_profile(user_data: Dict[str, Any]) -> Dict[str, Any]:
+    profile: Dict[str, Any] = {
+        "name": user_data.get("name", PROFILE_DEFAULT_NAME)
     }
 
-    STEM_YINYANG = {
-        "甲": "陽", "乙": "陰",
-        "丙": "陽", "丁": "陰",
-        "戊": "陽", "己": "陰",
-        "庚": "陽", "辛": "陰",
-        "壬": "陽", "癸": "陰",
-    }
+    birth_date = user_data.get("birth_date")
+    if birth_date:
+        try:
+            y, m, d = map(int, birth_date.split("-"))
+            profile.update({
+                "birth_year": y,
+                "birth_month": m,
+                "birth_day": d,
+            })
+        except Exception:
+            logger.warning("invalid birth_date format: %s", birth_date)
 
-    BRANCH_ELEMENT_MAIN = {
-        "子": "水", "丑": "土", "寅": "木", "卯": "木",
-        "辰": "土", "巳": "火", "午": "火", "未": "土",
-        "申": "金", "酉": "金", "戌": "土", "亥": "水",
-    }
+    birth_hour = safe_int(user_data.get("birth_hour"), None)
+    birth_minute = safe_int(user_data.get("birth_minute"), DEFAULT_UNKNOWN_MINUTE)
+    birth_second = safe_int(user_data.get("birth_second"), DEFAULT_UNKNOWN_SECOND)
+    birth_longitude = safe_float(user_data.get("birth_longitude"), DEFAULT_BIRTH_LONGITUDE)
 
-    HIDDEN_STEMS = {
-        "子": ["癸"],
-        "丑": ["己", "癸", "辛"],
-        "寅": ["甲", "丙", "戊"],
-        "卯": ["乙"],
-        "辰": ["戊", "乙", "癸"],
-        "巳": ["丙", "庚", "戊"],
-        "午": ["丁", "己"],
-        "未": ["己", "丁", "乙"],
-        "申": ["庚", "壬", "戊"],
-        "酉": ["辛"],
-        "戌": ["戊", "辛", "丁"],
-        "亥": ["壬", "甲"],
-    }
+    if birth_hour is not None:
+        profile["birth_hour"] = birth_hour
+    if birth_minute is not None:
+        profile["birth_minute"] = birth_minute
+    if birth_second is not None:
+        profile["birth_second"] = birth_second
+    if birth_longitude is not None:
+        profile["birth_longitude"] = birth_longitude
 
-    MONTH_BRANCH_ELEMENT_WEIGHTS = {
-        "寅": {"木": 1.8, "火": 1.0, "土": 0.6, "金": 0.4, "水": 0.8},
-        "卯": {"木": 2.0, "火": 0.8, "土": 0.5, "金": 0.3, "水": 0.7},
-        "辰": {"木": 0.8, "火": 0.7, "土": 1.8, "金": 0.5, "水": 0.8},
-        "巳": {"木": 0.7, "火": 1.9, "土": 0.9, "金": 0.5, "水": 0.3},
-        "午": {"木": 0.6, "火": 2.0, "土": 0.8, "金": 0.4, "水": 0.2},
-        "未": {"木": 0.7, "火": 0.8, "土": 1.9, "金": 0.5, "水": 0.4},
-        "申": {"木": 0.3, "火": 0.5, "土": 0.8, "金": 1.9, "水": 0.9},
-        "酉": {"木": 0.2, "火": 0.4, "土": 0.7, "金": 2.0, "水": 0.8},
-        "戌": {"木": 0.4, "火": 0.8, "土": 1.9, "金": 0.8, "水": 0.4},
-        "亥": {"木": 0.9, "火": 0.3, "土": 0.5, "金": 0.7, "水": 1.9},
-        "子": {"木": 0.8, "火": 0.2, "土": 0.4, "金": 0.8, "水": 2.0},
-        "丑": {"木": 0.5, "火": 0.4, "土": 1.8, "金": 0.8, "水": 0.9},
-    }
+    return profile
 
-    KIGAKU_LIST = [
-        "一白水星", "二黒土星", "三碧木星", "四緑木星", "五黄土星",
-        "六白金星", "七赤金星", "八白土星", "九紫火星"
+
+def push_text(user_id: str, text: str, quick_reply: Optional[QuickReply] = None) -> None:
+    line_bot_api.push_message(user_id, TextSendMessage(text=text, quick_reply=quick_reply))
+
+
+def get_payment_guide_text(user_data: Dict[str, Any]) -> str:
+    name = user_data.get("name", PROFILE_DEFAULT_NAME)
+    return (
+        f"{name}様の無料観測枠は使い切られています。\n"
+        f"より深い観測を続けるには有料プランをご利用ください。\n\n"
+        f"決済ページ: {PAYMENT_URL}\n\n"
+        "決済後に『決済完了』と送ってください。"
+    )
+
+
+def send_birthday_picker(user_id: str, message: str) -> None:
+    template = ButtonsTemplate(
+        text=message,
+        actions=[
+            DatetimePickerAction(
+                label="カレンダーで選択",
+                data="action=set_birthday",
+                mode="date",
+                initial="1995-01-01",
+            )
+        ],
+    )
+    line_bot_api.push_message(
+        user_id,
+        TemplateSendMessage(alt_text="誕生日選択", template=template),
+    )
+
+
+def send_time_picker(user_id: str) -> None:
+    template = ButtonsTemplate(
+        text="生まれた時刻は分かりますか？",
+        actions=[
+            DatetimePickerAction(
+                label="時刻を選択",
+                data="action=set_birthtime",
+                mode="time",
+                initial="12:00",
+            ),
+            PostbackAction(
+                label="分からない",
+                data="action=set_birthtime_unknown",
+                display_text="分からない",
+            ),
+        ],
+    )
+    line_bot_api.push_message(
+        user_id,
+        TemplateSendMessage(alt_text="時刻選択", template=template),
+    )
+
+
+def send_profile_confirm(user_id: str, date_str: str, time_str: str) -> None:
+    text = f"生年月日: {date_str}\n出生時刻: {time_str}\n\nこちらの刻印でよろしいでしょうか？"
+    items = [
+        QuickReplyButton(
+            action=PostbackAction(
+                label="はい",
+                data="action=confirm_profile&res=yes",
+                display_text="はい",
+            )
+        ),
+        QuickReplyButton(
+            action=PostbackAction(
+                label="やり直す",
+                data="action=confirm_profile&res=no",
+                display_text="やり直す",
+            )
+        ),
     ]
+    push_text(user_id, text, quick_reply=QuickReply(items=items))
 
-    SEXAGENARY_DAY_BASE_JDN = 2445733
 
-    TWELVE_STAGE_START = {
-        "甲": "亥", "乙": "午",
-        "丙": "寅", "丁": "酉",
-        "戊": "寅", "己": "酉",
-        "庚": "巳", "辛": "子",
-        "壬": "申", "癸": "卯",
-    }
-
-    TWELVE_STAGES_FORWARD = [
-        "長生", "沐浴", "冠帯", "建禄", "帝旺", "衰", "病", "死", "墓", "絶", "胎", "養"
+def send_restart_confirm(user_id: str) -> None:
+    items = [
+        QuickReplyButton(
+            action=PostbackAction(
+                label="はい",
+                data="action=restart&res=yes",
+                display_text="はい",
+            )
+        ),
+        QuickReplyButton(
+            action=PostbackAction(
+                label="いいえ",
+                data="action=restart&res=no",
+                display_text="いいえ",
+            )
+        ),
     ]
+    push_text(user_id, "新たなる観測を始めますか？", quick_reply=QuickReply(items=items))
 
-    @staticmethod
-    def julian_day(
-        year: int,
-        month: int,
-        day: int,
-        hour: int = 12,
-        minute: int = 0,
-        second: int = 0,
-        longitude: float = 135.0,
-    ) -> float:
-        y, m = (year - 1, month + 12) if month <= 2 else (year, month)
-        a = y // 100
-        b = 2 - a + (a // 4)
 
-        local_hour = hour + minute / 60.0 + second / 3600.0
-        corrected_hour = local_hour + (longitude - 135.0) * (4.0 / 60.0)
-
-        return (
-            math.floor(365.25 * (y + 4716))
-            + math.floor(30.6001 * (m + 1))
-            + day
-            + (corrected_hour / 24.0)
-            + b
-            - 1524.5
+def send_motif_picker(user_id: str) -> List[str]:
+    sampled = random.sample(ALL_MOTIFS, 4)
+    items = [
+        QuickReplyButton(
+            action=PostbackAction(
+                label=m,
+                data=f"action=select_motif&label={m}",
+                display_text=m,
+            )
         )
+        for m in sampled
+    ]
+    push_text(
+        user_id,
+        "準備は整いました。心に触れる象徴を一つ選んでください。",
+        quick_reply=QuickReply(items=items),
+    )
+    return sampled
 
-    @staticmethod
-    def solar_longitude(jd: float) -> float:
-        T = (jd - 2451545.0) / 36525.0
 
-        L0 = (
-            280.46646
-            + 36000.76983 * T
-            + 0.0003032 * T * T
-        ) % 360.0
+def get_user_ref(user_id: str):
+    return db.collection("users").document(user_id)
 
-        M = (
-            357.52911
-            + 35999.05029 * T
-            - 0.0001537 * T * T
-            + (T ** 3) / 24490000.0
-        ) % 360.0
 
-        Mrad = math.radians(M)
-        C = (
-            (1.914602 - 0.004817 * T - 0.000014 * T * T) * math.sin(Mrad)
-            + (0.019993 - 0.000101 * T) * math.sin(2 * Mrad)
-            + 0.000289 * math.sin(3 * Mrad)
-        )
+def get_sessions_ref(user_id: str):
+    return get_user_ref(user_id).collection("sessions")
 
-        true_long = L0 + C
-        omega = 125.04 - 1934.136 * T
-        lambda_app = true_long - 0.00569 - 0.00478 * math.sin(math.radians(omega))
 
-        return lambda_app % 360.0
+def get_session_ref(user_id: str, session_id: str):
+    return get_sessions_ref(user_id).document(session_id)
 
-    @classmethod
-    def effective_year_by_setsu(cls, birth_year: int, solar_long: float) -> int:
-        return birth_year if solar_long >= 315.0 else birth_year - 1
 
-    @classmethod
-    def year_pillar(cls, effective_year: int) -> str:
-        return cls.JUKKAN[(effective_year - 4) % 10] + cls.JUNISHI[(effective_year - 4) % 12]
+def get_messages_ref(user_id: str, session_id: str):
+    return get_session_ref(user_id, session_id).collection("messages")
 
-    @classmethod
-    def month_index_from_solar_longitude(cls, solar_long: float) -> int:
-        return int(((solar_long - 315.0) % 360.0) // 30.0)
 
-    @classmethod
-    def month_pillar(cls, year_stem: str, solar_long: float) -> str:
-        month_idx = cls.month_index_from_solar_longitude(solar_long)
+def load_user(user_id: str) -> Dict[str, Any]:
+    snap = get_user_ref(user_id).get()
+    data = snap.to_dict() or {}
 
-        start_kan_map = {
-            "甲": 2, "己": 2,
-            "乙": 4, "庚": 4,
-            "丙": 6, "辛": 6,
-            "丁": 8, "壬": 8,
-            "戊": 0, "癸": 0,
-        }
+    if "plan_status" not in data:
+        data["plan_status"] = "free"
+    if "free_sessions_remaining" not in data:
+        data["free_sessions_remaining"] = DEFAULT_FREE_SESSIONS
 
-        stem = cls.JUKKAN[(start_kan_map[year_stem] + month_idx) % 10]
-        branch = cls.JUNISHI[(2 + month_idx) % 12]
-        return stem + branch
-
-    @classmethod
-    def day_pillar(cls, jd: float) -> str:
-        di = (int(math.floor(jd + 0.5)) - cls.SEXAGENARY_DAY_BASE_JDN) % 60
-        return cls.JUKKAN[di % 10] + cls.JUNISHI[di % 12]
-
-    @classmethod
-    def hour_pillar(cls, day_stem: str, birth_hour: Optional[int]) -> Optional[str]:
-        if birth_hour is None:
-            return None
-
-        hour_branch_idx = ((birth_hour + 1) // 2) % 12
-        start_map = {
-            "甲": 0, "己": 0,
-            "乙": 2, "庚": 2,
-            "丙": 4, "辛": 4,
-            "丁": 6, "壬": 6,
-            "戊": 8, "癸": 8,
-        }
-        stem = cls.JUKKAN[(start_map[day_stem] + hour_branch_idx) % 10]
-        branch = cls.JUNISHI[hour_branch_idx]
-        return stem + branch
-
-    @classmethod
-    def nine_star_year(cls, effective_year: int) -> str:
-        star_num = 11 - (effective_year % 9)
-        while star_num > 9:
-            star_num -= 9
-        if star_num <= 0:
-            star_num += 9
-        return cls.KIGAKU_LIST[star_num - 1]
-
-    @classmethod
-    def get_hidden_stems(cls, pillar: Optional[str]) -> List[str]:
-        if not pillar:
-            return []
-        branch = pillar[1]
-        return cls.HIDDEN_STEMS.get(branch, [])
-
-    @classmethod
-    def _element_generates(cls, element: str) -> str:
-        return {"木": "火", "火": "土", "土": "金", "金": "水", "水": "木"}[element]
-
-    @classmethod
-    def _element_controls(cls, element: str) -> str:
-        return {"木": "土", "火": "金", "土": "水", "金": "木", "水": "火"}[element]
-
-    @classmethod
-    def get_tsuhen(cls, day_stem: str, target_stem: str) -> str:
-        day_el = cls.STEM_ELEMENT[day_stem]
-        day_yy = cls.STEM_YINYANG[day_stem]
-        tgt_el = cls.STEM_ELEMENT[target_stem]
-        tgt_yy = cls.STEM_YINYANG[target_stem]
-
-        same_yy = day_yy == tgt_yy
-
-        if day_el == tgt_el:
-            return "比肩" if same_yy else "劫財"
-
-        if cls._element_generates(day_el) == tgt_el:
-            return "食神" if same_yy else "傷官"
-
-        if cls._element_controls(day_el) == tgt_el:
-            return "偏財" if same_yy else "正財"
-
-        if cls._element_controls(tgt_el) == day_el:
-            return "偏官" if same_yy else "正官"
-
-        if cls._element_generates(tgt_el) == day_el:
-            return "偏印" if same_yy else "印綬"
-
-        return "不明"
-
-    @classmethod
-    def get_twelve_stage(cls, day_stem: str, branch: Optional[str]) -> Optional[str]:
-        if not branch:
-            return None
-
-        start_branch = cls.TWELVE_STAGE_START[day_stem]
-        start_idx = cls.JUNISHI.index(start_branch)
-        target_idx = cls.JUNISHI.index(branch)
-
-        is_yang = cls.STEM_YINYANG[day_stem] == "陽"
-
-        if is_yang:
-            diff = (target_idx - start_idx) % 12
+    if not data.get("phase"):
+        if not data.get("name"):
+            data["phase"] = PHASE_WAIT_NAME
+        elif not data.get("birth_date"):
+            data["phase"] = PHASE_WAIT_BIRTH_DATE
+        elif data.get("birth_hour") is None:
+            data["phase"] = PHASE_WAIT_BIRTH_TIME
+        elif not data.get("is_profile_confirmed"):
+            data["phase"] = PHASE_WAIT_PROFILE_CONFIRM
+        elif data.get("is_dialogue_mode"):
+            data["phase"] = PHASE_DIALOGUE
         else:
-            diff = (start_idx - target_idx) % 12
+            data["phase"] = PHASE_WAIT_RESTART_CONFIRM
 
-        return cls.TWELVE_STAGES_FORWARD[diff]
-
-    @classmethod
-    def compute_five_element_scores(
-        cls,
-        year_pillar: str,
-        month_pillar: str,
-        day_pillar: str,
-        hour_pillar: Optional[str],
-    ) -> Dict[str, float]:
-        scores = {"木": 0.0, "火": 0.0, "土": 0.0, "金": 0.0, "水": 0.0}
-
-        def add_stem(stem: str, weight: float):
-            scores[cls.STEM_ELEMENT[stem]] += weight
-
-        def add_hidden(branch: str, base_weights: List[float]):
-            hs = cls.HIDDEN_STEMS.get(branch, [])
-            for i, stem in enumerate(hs):
-                w = base_weights[i] if i < len(base_weights) else 0.2
-                scores[cls.STEM_ELEMENT[stem]] += w
-
-        pillars = [year_pillar, month_pillar, day_pillar]
-        if hour_pillar:
-            pillars.append(hour_pillar)
-
-        stem_weights = [1.0, 1.4, 1.2, 0.8] if hour_pillar else [1.0, 1.4, 1.2]
-        hidden_weights = {
-            0: [0.7, 0.25, 0.15],
-            1: [1.2, 0.35, 0.2],
-            2: [0.9, 0.3, 0.15],
-            3: [0.6, 0.2, 0.1],
-        }
-
-        for idx, pillar in enumerate(pillars):
-            stem = pillar[0]
-            branch = pillar[1]
-            add_stem(stem, stem_weights[idx])
-            add_hidden(branch, hidden_weights[idx])
-
-        month_branch = month_pillar[1]
-        season_weights = cls.MONTH_BRANCH_ELEMENT_WEIGHTS.get(month_branch, {})
-        for el, mul in season_weights.items():
-            scores[el] *= mul
-
-        return {k: round(v, 3) for k, v in scores.items()}
-
-    @classmethod
-    def evaluate_self_strength_hint(
-        cls,
-        day_stem: str,
-        month_pillar: str,
-        five_scores: Dict[str, float],
-    ) -> str:
-        dm_element = cls.STEM_ELEMENT[day_stem]
-        resource_element = None
-        for el, gen in {"木": "火", "火": "土", "土": "金", "金": "水", "水": "木"}.items():
-            if gen == dm_element:
-                resource_element = el
-                break
-
-        same_score = five_scores.get(dm_element, 0.0)
-        resource_score = five_scores.get(resource_element, 0.0) if resource_element else 0.0
-
-        support = same_score + resource_score
-        total = sum(five_scores.values()) or 1.0
-        ratio = support / total
-
-        month_branch = month_pillar[1]
-        season_main = cls.BRANCH_ELEMENT_MAIN[month_branch]
-
-        if season_main == dm_element:
-            ratio += 0.08
-        elif resource_element and season_main == resource_element:
-            ratio += 0.05
-
-        if ratio >= 0.42:
-            return "やや身強〜身強寄り"
-        if ratio <= 0.25:
-            return "やや身弱〜身弱寄り"
-        return "中和寄り"
-
-    @classmethod
-    def build_four_pillars(
-        cls,
-        birth_year: int,
-        birth_month: int,
-        birth_day: int,
-        birth_hour: Optional[int] = None,
-        birth_minute: int = 0,
-        birth_second: int = 0,
-        birth_longitude: float = 135.0,
-    ) -> PillarResult:
-        jd = cls.julian_day(
-            birth_year,
-            birth_month,
-            birth_day,
-            birth_hour if birth_hour is not None else 12,
-            birth_minute,
-            birth_second,
-            birth_longitude,
-        )
-
-        sl = cls.solar_longitude(jd)
-        ey = cls.effective_year_by_setsu(birth_year, sl)
-        yp = cls.year_pillar(ey)
-        mp = cls.month_pillar(yp[0], sl)
-        dp = cls.day_pillar(jd)
-        hp = cls.hour_pillar(dp[0], birth_hour)
-
-        yh = cls.get_hidden_stems(yp)
-        mh = cls.get_hidden_stems(mp)
-        dh = cls.get_hidden_stems(dp)
-        hh = cls.get_hidden_stems(hp)
-
-        yt = cls.get_twelve_stage(dp[0], yp[1])
-        mt = cls.get_twelve_stage(dp[0], mp[1])
-        dt = cls.get_twelve_stage(dp[0], dp[1])
-        ht = cls.get_twelve_stage(dp[0], hp[1]) if hp else None
-
-        yts = cls.get_tsuhen(dp[0], yp[0])
-        mts = cls.get_tsuhen(dp[0], mp[0])
-        dts = cls.get_tsuhen(dp[0], dp[0])
-        hts = cls.get_tsuhen(dp[0], hp[0]) if hp else None
-
-        five_scores = cls.compute_five_element_scores(yp, mp, dp, hp)
-        self_strength_hint = cls.evaluate_self_strength_hint(dp[0], mp, five_scores)
-
-        return PillarResult(
-            year_pillar=yp,
-            month_pillar=mp,
-            day_pillar=dp,
-            hour_pillar=hp,
-            year_hidden_stems=yh,
-            month_hidden_stems=mh,
-            day_hidden_stems=dh,
-            hour_hidden_stems=hh,
-            year_twelve_stage=yt,
-            month_twelve_stage=mt,
-            day_twelve_stage=dt,
-            hour_twelve_stage=ht,
-            year_tsuhen=yts,
-            month_tsuhen=mts,
-            day_tsuhen=dts,
-            hour_tsuhen=hts,
-            effective_year=ey,
-            solar_longitude=sl,
-            nine_star_year=cls.nine_star_year(ey),
-            five_element_scores=five_scores,
-            self_strength_hint=self_strength_hint,
-        )
+    return data
 
 
-class OracleEngine:
-    TAROT_LIST = [
-        "愚者", "魔術師", "女教皇", "女帝", "皇帝", "教皇", "恋人",
-        "戦車", "力", "隠者", "運命の輪", "正義", "吊るされた男",
-        "死神", "節制", "悪魔", "塔", "星", "月", "太陽", "審判", "世界"
-    ]
+def save_user(user_id: str, patch: Dict[str, Any]) -> None:
+    patch["updated_at"] = now_iso()
+    get_user_ref(user_id).set(patch, merge=True)
 
-    def __init__(
-        self,
-        openai_client,
-        model_name: Optional[str] = None,
-    ):
-        self.openai_client = openai_client
-        self.cal = PreciseCalendar()
-        self.model_name = model_name or os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
-    @staticmethod
-    def _stable_seed(
-        y: int,
-        m: int,
-        d: int,
-        h: Optional[int],
-        mn: int,
-        motif_label: str,
-        user_text: str,
-    ) -> int:
-        seed_str = f"{y:04d}-{m:02d}-{d:02d}|{h}|{mn}|{motif_label}|{user_text}"
-        return int(hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
+def delete_user_fields(user_id: str, field_names: List[str]) -> None:
+    patch = {name: DELETE_FIELD for name in field_names}
+    patch["updated_at"] = now_iso()
+    get_user_ref(user_id).set(patch, merge=True)
 
-    @staticmethod
-    def _extract_text_from_response(response: Any) -> str:
-        text = getattr(response, "output_text", None)
-        if text and str(text).strip():
-            return str(text).strip()
 
+def reset_user(user_id: str) -> None:
+    get_user_ref(user_id).delete()
+
+
+def finalize_profile_confirm_text(user_data: Dict[str, Any]) -> str:
+    hour = safe_int(user_data.get("birth_hour"), None)
+    minute = safe_int(user_data.get("birth_minute"), 0)
+
+    if hour is None:
+        return "未設定"
+
+    if int(hour) == DEFAULT_UNKNOWN_HOUR and user_data.get("birth_time_unknown") is True:
+        return "不明（正午として計算）"
+
+    return f"{int(hour):02d}:{int(minute):02d}頃"
+
+
+def log_usage_if_any(result: Dict[str, Any], user_id: str) -> None:
+    try:
+        summary = result.get("summary", {}) or {}
+        usage = summary.get("usage_metadata")
+        if usage:
+            logger.info("usage user_id=%s usage=%s", user_id, usage)
+    except Exception:
+        logger.exception("usage log failed")
+
+
+def can_start_paid_reading(user_data: Dict[str, Any]) -> bool:
+    if user_data.get("plan_status") == "paid":
+        return True
+    return int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS)) > 0
+
+
+def consume_session_credit_if_needed(user_id: str, user_data: Dict[str, Any]) -> None:
+    if user_data.get("plan_status") == "paid":
+        return
+
+    remaining = int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS))
+    if remaining > 0:
+        save_user(user_id, {"free_sessions_remaining": remaining - 1})
+
+
+def create_new_session(user_id: str, user_data: Dict[str, Any], consult_text: str, motif_label: str) -> str:
+    session_id = str(uuid4())
+    session_doc = {
+        "session_id": session_id,
+        "user_name": user_data.get("name", PROFILE_DEFAULT_NAME),
+        "status": "active",
+        "plan_status": user_data.get("plan_status", "free"),
+        "motif_label": motif_label,
+        "initial_consult": consult_text,
+        "started_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    get_session_ref(user_id, session_id).set(session_doc, merge=True)
+    save_user(user_id, {"current_session_id": session_id})
+    return session_id
+
+
+def close_session(user_id: str, session_id: str) -> None:
+    get_session_ref(user_id, session_id).set(
+        {
+            "status": "closed",
+            "closed_at": now_iso(),
+            "updated_at": now_iso(),
+        },
+        merge=True,
+    )
+
+
+def append_session_message(
+    user_id: str,
+    session_id: str,
+    role: str,
+    text: str,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    message_id = str(uuid4())
+    payload = {
+        "message_id": message_id,
+        "role": role,
+        "text": text,
+        "created_at": now_iso(),
+    }
+    if extra:
+        payload.update(extra)
+
+    get_messages_ref(user_id, session_id).document(message_id).set(payload, merge=True)
+    get_session_ref(user_id, session_id).set({"updated_at": now_iso()}, merge=True)
+
+
+def process_and_push_reply(
+    user_id: str,
+    user_text: str,
+    motif_label: Optional[str] = None,
+    selected_date: Optional[str] = None,
+    selected_time: Optional[str] = None,
+) -> None:
+    lock = get_user_lock(user_id)
+
+    with lock:
         try:
-            outputs = getattr(response, "output", None) or []
-            chunks = []
-            for item in outputs:
-                content = getattr(item, "content", None) or []
-                for c in content:
-                    if getattr(c, "type", None) == "output_text":
-                        t = getattr(c, "text", None)
-                        if t:
-                            chunks.append(t)
-            merged = "\n".join(chunks).strip()
-            if merged:
-                return merged
-        except Exception:
-            pass
-
-        return "……時の帳がまだ閉じています。"
-
-    @staticmethod
-    def _extract_usage_metadata(response: Any) -> Dict[str, Any]:
-        try:
-            usage = getattr(response, "usage", None)
-            if usage is None:
-                return {}
-
-            out: Dict[str, Any] = {}
-            for key in ["input_tokens", "output_tokens", "total_tokens"]:
-                val = getattr(usage, key, None)
-                if val is not None:
-                    out[key] = val
-            return out
-        except Exception:
-            return {}
-
-    def _build_prompt(
-        self,
-        user_name: str,
-        motif_label: str,
-        user_text: str,
-        pillars: PillarResult,
-        eki_num: int,
-        tarot_name: str,
-        is_dialogue: bool,
-        chat_history: str,
-    ) -> str:
-        five_str = " / ".join([f"{k}:{v}" for k, v in pillars.five_element_scores.items()])
-
-        common_observation = f"""
-# 観測断片
-- 宿命: {pillars.year_pillar} / {pillars.month_pillar} / {pillars.day_pillar} / {pillars.hour_pillar or '時刻不明'}
-- 蔵干:
-  - 年: {", ".join(pillars.year_hidden_stems)}
-  - 月: {", ".join(pillars.month_hidden_stems)}
-  - 日: {", ".join(pillars.day_hidden_stems)}
-  - 時: {", ".join(pillars.hour_hidden_stems) if pillars.hour_hidden_stems else 'なし'}
-- 通変の気配:
-  - 年干: {pillars.year_tsuhen}
-  - 月干: {pillars.month_tsuhen}
-  - 日干: {pillars.day_tsuhen}
-  - 時干: {pillars.hour_tsuhen or 'なし'}
-- 十二運:
-  - 年支: {pillars.year_twelve_stage}
-  - 月支: {pillars.month_twelve_stage}
-  - 日支: {pillars.day_twelve_stage}
-  - 時支: {pillars.hour_twelve_stage or 'なし'}
-- 五行分布: {five_str}
-- 日主の勢い: {pillars.self_strength_hint}
-- 九星: {pillars.nine_star_year}
-- 兆し: 象徴数 {eki_num} / 寓話の絵「{tarot_name}」
-- 相談内容: {user_text}
-""".strip()
-
-        if not is_dialogue:
-            return f"""
-あなたは未来観測者『識（SHIKI）』。{user_name}様が選んだ「{motif_label}」を通して届いた問いに対し、神託を伝えてください。
-
-# 重要禁忌
-- 「占い」「鑑定」「易」「タロット」「四柱推命」「通変星」「五行」など技法名は一切出さないこと。
-- 冒頭に挨拶・前置き・説明を入れず、いきなり核心の神託から始めること。
-- 神秘性を保ちつつ、内容は曖昧すぎず、相談に対する方向性が読み取れること。
-- 返答は最大420文字程度、3〜5段落以内。
-- 比喩を重ねすぎず、要点を絞ること。
-- 最後は余韻を残して閉じること。
-
-{common_observation}
-""".strip()
-
-        return f"""
-あなたは未来観測者『識（SHIKI）』。{user_name}様と継続対話しています。
-
-# 対話ルール
-- 技法名は一切出さないこと。
-- 神秘的な世界観は守りつつ、内容は現実的・具体的に解読すること。
-- 一度に全てを話し切らず、今の問いに必要な断片だけを渡すこと。
-- 生活、感情、仕事、人間関係など、現実の選択に落とし込むこと。
-- 返答は最大350文字程度を目安にし、長くしすぎないこと。
-- 相手が納得した様子なら「では、私は向こうに戻ってもよろしいでしょうか？」と確認すること。
-- 利用者が明確に終話を了承した場合のみ、最後の挨拶の末尾に [END_SESSION] を付けること。
-- 「最後に」「さて」「それでは」は使わないこと。
-
-# 会話履歴
-{chat_history or "（履歴なし）"}
-
-{common_observation}
-""".strip()
-
-    def predict(
-        self,
-        user_profile: Dict[str, Any],
-        user_text: str,
-        motif_label: str,
-        is_dialogue: bool = False,
-        chat_history: str = "",
-    ) -> Dict[str, Any]:
-        try:
-            user_name = user_profile.get("name", "あなた")
-
-            birth_year = int(user_profile["birth_year"])
-            birth_month = int(user_profile["birth_month"])
-            birth_day = int(user_profile["birth_day"])
-            birth_hour = user_profile.get("birth_hour")
-            birth_minute = int(user_profile.get("birth_minute", 0))
-            birth_second = int(user_profile.get("birth_second", 0))
-            birth_longitude = float(user_profile.get("birth_longitude", 135.0))
-
-            if birth_hour is not None:
-                birth_hour = int(birth_hour)
-
-            pillars = self.cal.build_four_pillars(
-                birth_year=birth_year,
-                birth_month=birth_month,
-                birth_day=birth_day,
-                birth_hour=birth_hour,
-                birth_minute=birth_minute,
-                birth_second=birth_second,
-                birth_longitude=birth_longitude,
-            )
-
-            seed = self._stable_seed(
-                birth_year,
-                birth_month,
-                birth_day,
-                birth_hour,
-                birth_minute,
-                motif_label,
-                user_text,
-            )
-
-            eki_num = (seed % 64) + 1
-            tarot_name = self.TAROT_LIST[seed % len(self.TAROT_LIST)]
-
-            prompt = self._build_prompt(
-                user_name=user_name,
-                motif_label=motif_label,
-                user_text=user_text,
-                pillars=pillars,
-                eki_num=eki_num,
-                tarot_name=tarot_name,
-                is_dialogue=is_dialogue,
-                chat_history=chat_history,
-            )
+            user_data = load_user(user_id)
+            text = normalize_text(user_text)
+            phase = user_data.get("phase", PHASE_WAIT_NAME)
 
             logger.info(
-                "OracleEngine predict start model=%s user=%s motif=%s dialogue=%s",
-                self.model_name, user_name, motif_label, is_dialogue
+                "process start user_id=%s phase=%s text=%s motif=%s date=%s time=%s",
+                user_id, phase, text, motif_label, selected_date, selected_time
             )
 
-            response = self.openai_client.responses.create(
-                model=self.model_name,
-                input=prompt,
-            )
+            if text == "リセット":
+                reset_user(user_id)
+                push_text(
+                    user_id,
+                    "ようこそ、探究者の方。新たな観測を始めましょう。\n"
+                    "まずは、あなた様をどのようにお呼びすればよろしいですか？"
+                    "（『〇〇です』などは付けず、お呼びするお名前のみを送信してください）"
+                )
+                return
 
-            message = self._extract_text_from_response(response)
-            usage_metadata = self._extract_usage_metadata(response)
+            if text == "決済完了":
+                save_user(
+                    user_id,
+                    {"plan_status": "paid", "phase": PHASE_WAIT_RESTART_CONFIRM},
+                )
+                push_text(user_id, "決済完了として記録しました。では、改めて今視たいことを教えてください。")
+                return
 
-            logger.info(
-                "OracleEngine predict success model=%s usage=%s",
-                self.model_name, usage_metadata
-            )
+            if phase == PHASE_WAIT_NAME:
+                clean_name = extract_clean_name(text)
+                if not clean_name:
+                    push_text(user_id, "お呼びするお名前だけを、短く送ってください。")
+                    return
 
-            return {
-                "message": message,
-                "summary": {
-                    "pillars": {
-                        "year": pillars.year_pillar,
-                        "month": pillars.month_pillar,
-                        "day": pillars.day_pillar,
-                        "hour": pillars.hour_pillar,
+                save_user(
+                    user_id,
+                    {
+                        "name": clean_name,
+                        "phase": PHASE_WAIT_BIRTH_DATE,
+                        "is_profile_confirmed": False,
+                        "birth_time_unknown": False,
+                        "plan_status": user_data.get("plan_status", "free"),
+                        "free_sessions_remaining": int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS)),
                     },
-                    "hidden_stems": {
-                        "year": pillars.year_hidden_stems,
-                        "month": pillars.month_hidden_stems,
-                        "day": pillars.day_hidden_stems,
-                        "hour": pillars.hour_hidden_stems,
-                    },
-                    "tsuhen": {
-                        "year": pillars.year_tsuhen,
-                        "month": pillars.month_tsuhen,
-                        "day": pillars.day_tsuhen,
-                        "hour": pillars.hour_tsuhen,
-                    },
-                    "twelve_stage": {
-                        "year": pillars.year_twelve_stage,
-                        "month": pillars.month_twelve_stage,
-                        "day": pillars.day_twelve_stage,
-                        "hour": pillars.hour_twelve_stage,
-                    },
-                    "five_element_scores": pillars.five_element_scores,
-                    "self_strength_hint": pillars.self_strength_hint,
-                    "nine_star_year": pillars.nine_star_year,
-                    "effective_year": pillars.effective_year,
-                    "solar_longitude": round(pillars.solar_longitude, 6),
-                    "eki_num": eki_num,
-                    "tarot_name": tarot_name,
-                    "model_name": self.model_name,
-                    "usage_metadata": usage_metadata,
-                },
-                "topic": "dialogue" if is_dialogue else "oracle",
-            }
+                )
+                send_birthday_picker(
+                    user_id,
+                    f"……{clean_name}様ですね。心に刻みました。次に、あなたの生まれた日を教えてください。"
+                )
+                return
 
-        except Exception as e:
-            logger.exception("OracleEngine Error")
-            msg = str(e)
+            if phase == PHASE_WAIT_BIRTH_DATE:
+                if selected_date:
+                    save_user(user_id, {"birth_date": selected_date, "phase": PHASE_WAIT_BIRTH_TIME})
+                    send_time_picker(user_id)
+                    return
 
-            if "429" in msg or "rate limit" in msg.lower():
-                return {
-                    "message": "いま観測が集中しており、しばらく扉が閉じています。少し時間を置いて、もう一度声をかけてください。",
-                    "summary": {},
-                    "topic": "quota_error",
-                }
+                send_birthday_picker(
+                    user_id,
+                    f"{user_data.get('name', PROFILE_DEFAULT_NAME)}様。観測を始める前に、生まれた日を教えてください。"
+                )
+                return
 
-            return {
-                "message": f"観測の視界が一時的に曇りました。({msg[:120]})",
-                "summary": {},
-                "topic": "error",
-            }
+            if phase == PHASE_WAIT_BIRTH_TIME:
+                birth_date = user_data.get("birth_date")
+                if not birth_date:
+                    save_user(user_id, {"phase": PHASE_WAIT_BIRTH_DATE})
+                    send_birthday_picker(user_id, "先に生まれた日を教えてください。")
+                    return
+
+                if selected_time:
+                    try:
+                        hh_str, mm_str = selected_time.split(":")
+                        hour = int(hh_str)
+                        minute = int(mm_str)
+                    except Exception:
+                        push_text(user_id, "時刻の読み取りに失敗しました。もう一度お試しください。")
+                        send_time_picker(user_id)
+                        return
+
+                    save_user(
+                        user_id,
+                        {
+                            "birth_hour": hour,
+                            "birth_minute": minute,
+                            "birth_second": 0,
+                            "birth_longitude": user_data.get("birth_longitude", DEFAULT_BIRTH_LONGITUDE),
+                            "birth_time_unknown": False,
+                            "phase": PHASE_WAIT_PROFILE_CONFIRM,
+                        },
+                    )
+                    send_profile_confirm(user_id, birth_date, f"{hour:02d}:{minute:02d}頃")
+                    return
+
+                if text == "UNKNOWN_TIME":
+                    save_user(
+                        user_id,
+                        {
+                            "birth_hour": DEFAULT_UNKNOWN_HOUR,
+                            "birth_minute": DEFAULT_UNKNOWN_MINUTE,
+                            "birth_second": DEFAULT_UNKNOWN_SECOND,
+                            "birth_longitude": user_data.get("birth_longitude", DEFAULT_BIRTH_LONGITUDE),
+                            "birth_time_unknown": True,
+                            "phase": PHASE_WAIT_PROFILE_CONFIRM,
+                        },
+                    )
+                    send_profile_confirm(user_id, birth_date, "不明（正午として計算）")
+                    return
+
+                send_time_picker(user_id)
+                return
+
+            if phase == PHASE_WAIT_PROFILE_CONFIRM:
+                if text == "CONFIRM_YES":
+                    yn = "yes"
+                elif text == "CONFIRM_NO":
+                    yn = "no"
+                else:
+                    yn = normalize_yes_no(text)
+
+                if yn == "yes":
+                    save_user(user_id, {"is_profile_confirmed": True, "phase": PHASE_WAIT_RESTART_CONFIRM})
+                    push_text(
+                        user_id,
+                        f"刻印が完成しました。今、{user_data.get('name', PROFILE_DEFAULT_NAME)}様が一番視たいことは何でしょうか。"
+                    )
+                    return
+
+                if yn == "no":
+                    save_user(user_id, {"is_profile_confirmed": False, "phase": PHASE_WAIT_BIRTH_DATE})
+                    delete_user_fields(
+                        user_id,
+                        ["birth_date", "birth_hour", "birth_minute", "birth_second", "birth_time_unknown"]
+                    )
+                    send_birthday_picker(user_id, "承知いたしました。では、もう一度生まれた日を正しく教えてください。")
+                    return
+
+                send_profile_confirm(
+                    user_id,
+                    user_data.get("birth_date", "未設定"),
+                    finalize_profile_confirm_text(user_data),
+                )
+                return
+
+            if phase == PHASE_WAIT_RESTART_CONFIRM:
+                if text == "RESTART_YES":
+                    yn = "yes"
+                elif text == "RESTART_NO":
+                    yn = "no"
+                else:
+                    yn = normalize_yes_no(text)
+
+                if yn is None and text:
+                    save_user(user_id, {"temp_restart_text": text})
+                    send_restart_confirm(user_id)
+                    return
+
+                if yn == "no":
+                    delete_user_fields(user_id, ["temp_restart_text"])
+                    push_text(user_id, "承知いたしました。私はまた淵にてお待ちしております。")
+                    return
+
+                if yn == "yes":
+                    if not can_start_paid_reading(user_data):
+                        save_user(user_id, {"phase": PHASE_WAIT_PAYMENT})
+                        push_text(user_id, get_payment_guide_text(user_data))
+                        return
+
+                    consult_seed = user_data.get("temp_restart_text", "これからの運勢")
+                    consult_seed = normalize_text(consult_seed)
+
+                    if len(consult_seed) <= 15:
+                        save_user(
+                            user_id,
+                            {"temp_category": consult_seed, "phase": PHASE_WAIT_CONSULT_DETAIL},
+                        )
+                        push_text(
+                            user_id,
+                            f"……「{consult_seed}」についてですね。その奥にある想いを、もう少しだけ詳しく教えていただけますか？\n"
+                            "（具体的な状況や、今感じている不安などを教えていただけると、より深く観測できます）"
+                        )
+                        return
+
+                    save_user(
+                        user_id,
+                        {
+                            "pending_consult": consult_seed,
+                            "temp_restart_text": DELETE_FIELD,
+                            "temp_category": DELETE_FIELD,
+                            "phase": PHASE_WAIT_MOTIF,
+                        },
+                    )
+                    sampled = send_motif_picker(user_id)
+                    save_user(user_id, {"last_presented_motifs": sampled})
+                    return
+
+            if phase == PHASE_WAIT_PAYMENT:
+                push_text(user_id, get_payment_guide_text(user_data))
+                return
+
+            if phase == PHASE_WAIT_CONSULT_DETAIL:
+                category = user_data.get("temp_category", "これからの運勢")
+                detail = text if text else "詳しい事情はまだ言葉にならない"
+                combined_consult = f"{category}（詳細：{detail}）"
+
+                save_user(
+                    user_id,
+                    {
+                        "pending_consult": combined_consult,
+                        "temp_category": DELETE_FIELD,
+                        "temp_restart_text": DELETE_FIELD,
+                        "phase": PHASE_WAIT_MOTIF,
+                    },
+                )
+                sampled = send_motif_picker(user_id)
+                save_user(user_id, {"last_presented_motifs": sampled})
+                return
+
+            if phase == PHASE_WAIT_MOTIF:
+                if not motif_label:
+                    sampled = user_data.get("last_presented_motifs")
+                    if not sampled or len(sampled) < 1:
+                        sampled = send_motif_picker(user_id)
+                        save_user(user_id, {"last_presented_motifs": sampled})
+                    else:
+                        items = [
+                            QuickReplyButton(
+                                action=PostbackAction(
+                                    label=m,
+                                    data=f"action=select_motif&label={m}",
+                                    display_text=m,
+                                )
+                            )
+                            for m in sampled
+                        ]
+                        push_text(
+                            user_id,
+                            "心に触れる象徴を一つ選んでください。",
+                            quick_reply=QuickReply(items=items),
+                        )
+                    return
+
+                profile = build_user_profile(user_data)
+                required_keys = ["birth_year", "birth_month", "birth_day"]
+                missing = [k for k in required_keys if k not in profile]
+                if missing:
+                    logger.warning("profile missing keys user_id=%s missing=%s profile=%s", user_id, missing, profile)
+                    push_text(user_id, "刻印に不足があるようです。リセットして、もう一度最初から刻印を整えてください。")
+                    return
+
+                consult_text = user_data.get("pending_consult", "これからの運勢")
+                logger.info(
+                    "oracle start user_id=%s motif=%s consult=%s profile=%s",
+                    user_id, motif_label, consult_text[:80], profile
+                )
+
+                # ここで一文入れる
+                push_text(user_id, "想いは届きました。神託を降ろしています。")
+
+                consume_session_credit_if_needed(user_id, user_data)
+
+                result = oracle_engine.predict(
+                    user_profile=profile,
+                    user_text=consult_text,
+                    motif_label=motif_label,
+                    is_dialogue=False,
+                    chat_history="",
+                )
+                reply_text = result["message"]
+                logger.info("oracle finish user_id=%s topic=%s", user_id, result.get("topic"))
+                log_usage_if_any(result, user_id)
+
+                history = f"識の神託: {reply_text}\n"
+                history = trim_history(history)
+
+                session_id = create_new_session(user_id, user_data, consult_text, motif_label)
+                append_session_message(
+                    user_id,
+                    session_id,
+                    "oracle",
+                    reply_text,
+                    extra={"summary": result.get("summary", {})},
+                )
+
+                save_user(
+                    user_id,
+                    {
+                        "is_dialogue_mode": True,
+                        "phase": PHASE_DIALOGUE,
+                        "chat_history": history,
+                        "last_motif": motif_label,
+                        "last_oracle_message": reply_text,
+                        "last_oracle_summary": result.get("summary", {}),
+                        "pending_consult": DELETE_FIELD,
+                        "temp_category": DELETE_FIELD,
+                        "temp_restart_text": DELETE_FIELD,
+                    },
+                )
+                push_text(user_id, reply_text)
+                return
+
+            if phase == PHASE_DIALOGUE:
+                profile = build_user_profile(user_data)
+                required_keys = ["birth_year", "birth_month", "birth_day"]
+                missing = [k for k in required_keys if k not in profile]
+                if missing:
+                    logger.warning(
+                        "profile missing keys in dialogue user_id=%s missing=%s profile=%s",
+                        user_id, missing, profile
+                    )
+                    push_text(user_id, "刻印に不足があるようです。リセットして、もう一度最初から刻印を整えてください。")
+                    return
+
+                history = trim_history(user_data.get("chat_history", ""))
+                session_id = user_data.get("current_session_id")
+
+                if session_id:
+                    append_session_message(user_id, session_id, "user", text)
+
+                result = oracle_engine.predict(
+                    user_profile=profile,
+                    user_text=text,
+                    motif_label=user_data.get("last_motif", "静かなる光"),
+                    is_dialogue=True,
+                    chat_history=history,
+                )
+                reply_text = result["message"]
+                logger.info("dialogue finish user_id=%s topic=%s", user_id, result.get("topic"))
+                log_usage_if_any(result, user_id)
+
+                if session_id:
+                    append_session_message(
+                        user_id,
+                        session_id,
+                        "oracle",
+                        reply_text,
+                        extra={"summary": result.get("summary", {})},
+                    )
+
+                if "[END_SESSION]" in reply_text:
+                    reply_text = reply_text.replace("[END_SESSION]", "").strip()
+
+                    if session_id:
+                        close_session(user_id, session_id)
+
+                    save_user(
+                        user_id,
+                        {
+                            "is_dialogue_mode": False,
+                            "phase": PHASE_WAIT_RESTART_CONFIRM,
+                            "last_oracle_message": reply_text,
+                            "last_oracle_summary": result.get("summary", {}),
+                            "current_session_id": DELETE_FIELD,
+                            "chat_history": DELETE_FIELD,
+                            "pending_consult": DELETE_FIELD,
+                            "temp_category": DELETE_FIELD,
+                            "temp_restart_text": DELETE_FIELD,
+                        },
+                    )
+                    push_text(user_id, reply_text)
+                    return
+
+                user_name = user_data.get("name", PROFILE_DEFAULT_NAME)
+                new_history = history + f"{user_name}: {text}\n識: {reply_text}\n"
+                new_history = trim_history(new_history)
+
+                save_user(
+                    user_id,
+                    {
+                        "chat_history": new_history,
+                        "last_oracle_message": reply_text,
+                        "last_oracle_summary": result.get("summary", {}),
+                    },
+                )
+                push_text(user_id, reply_text)
+                return
+
+            logger.warning("unknown phase user_id=%s phase=%s", user_id, phase)
+            save_user(user_id, {"phase": PHASE_WAIT_RESTART_CONFIRM})
+            push_text(user_id, "少し視界が揺らぎました。もう一度、今視たいことを教えてください。")
+            return
+
+        except Exception:
+            logger.exception("Error while processing reply for user_id=%s", user_id)
+            try:
+                push_text(user_id, "識の視界が揺らぎました。もう一度だけ、同じ内容を送ってみてください。")
+            except Exception:
+                logger.exception("Failed to push fallback message for user_id=%s", user_id)
+
+
+@app.get("/health")
+async def health() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/healthz")
+async def healthz() -> Dict[str, str]:
+    return {"status": "ok", "model": OPENAI_MODEL, "service": SERVICE_NAME}
+
+
+@app.post("/callback")
+async def callback(request: Request):
+    signature = request.headers.get("X-Line-Signature")
+    if not signature:
+        raise HTTPException(status_code=400, detail="Missing X-Line-Signature")
+
+    body = await request.body()
+    body_text = body.decode("utf-8")
+
+    try:
+        handler.handle(body_text, signature)
+    except InvalidSignatureError:
+        logger.warning("Invalid signature")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    except Exception:
+        logger.exception("Callback handling failed")
+        raise HTTPException(status_code=500, detail="Callback error")
+
+    return JSONResponse({"ok": True})
+
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event: MessageEvent):
+    user_id = event.source.user_id
+    text = normalize_text(event.message.text)
+
+    thread = threading.Thread(
+        target=process_and_push_reply,
+        args=(user_id, text),
+        daemon=True,
+    )
+    thread.start()
+
+
+@handler.add(PostbackEvent)
+def handle_postback(event: PostbackEvent):
+    user_id = event.source.user_id
+    query = parse_postback_data(event.postback.data)
+    action = query.get("action")
+
+    if action == "confirm_profile":
+        text_val = "CONFIRM_YES" if query.get("res") == "yes" else "CONFIRM_NO"
+        threading.Thread(
+            target=process_and_push_reply,
+            args=(user_id, text_val),
+            daemon=True,
+        ).start()
+        return
+
+    if action == "restart":
+        text_val = "RESTART_YES" if query.get("res") == "yes" else "RESTART_NO"
+        threading.Thread(
+            target=process_and_push_reply,
+            args=(user_id, text_val),
+            daemon=True,
+        ).start()
+        return
+
+    if action == "select_motif":
+        threading.Thread(
+            target=process_and_push_reply,
+            args=(user_id, "", query.get("label")),
+            daemon=True,
+        ).start()
+        return
+
+    if action == "set_birthday":
+        selected_date = None
+        if event.postback.params:
+            selected_date = event.postback.params.get("date")
+        threading.Thread(
+            target=process_and_push_reply,
+            args=(user_id, "", None, selected_date),
+            daemon=True,
+        ).start()
+        return
+
+    if action == "set_birthtime":
+        selected_time = None
+        if event.postback.params:
+            selected_time = event.postback.params.get("time")
+        threading.Thread(
+            target=process_and_push_reply,
+            args=(user_id, "", None, None, selected_time),
+            daemon=True,
+        ).start()
+        return
+
+    if action == "set_birthtime_unknown":
+        threading.Thread(
+            target=process_and_push_reply,
+            args=(user_id, "UNKNOWN_TIME"),
+            daemon=True,
+        ).start()
+        return
+
+    logger.warning("Unknown postback action: %s", action)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+    )
