@@ -736,7 +736,6 @@ def process_and_push_reply(
                     user_id, motif_label, consult_text[:80], profile
                 )
 
-                # ここで一文入れる
                 push_text(user_id, "想いは届きました。神託を降ろしています。")
 
                 consume_session_credit_if_needed(user_id, user_data)
