@@ -5,6 +5,8 @@ import threading
 import random
 import re
 import unicodedata
+from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -19,7 +21,6 @@ from google import genai
 import firebase_admin
 from firebase_admin import credentials, firestore
 from oracle_engine import OracleEngine
-from typing import Optional
 
 # 初期化
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s : %(message)s")
@@ -62,7 +63,14 @@ def send_time_picker(user_id: str):
     time_picker = ButtonsTemplate(text="生まれた時刻は分かりますか？", actions=[DatetimePickerAction(label="時刻を選択", data="action=set_birthtime", mode="time", initial="12:00"), PostbackAction(label="分からない", data="action=set_birthtime_unknown")])
     line_bot_api.push_message(user_id, TemplateSendMessage(alt_text="時刻選択", template=time_picker))
 
-# ユーザープロフィールを安全に構築するヘルパー関数
+def send_profile_confirm(user_id: str, date_str: str, time_str: str):
+    text = f"生年月日: {date_str}\n出生時刻: {time_str}\n\nこちらの刻印でよろしいでしょうか？"
+    buttons = [
+        QuickReplyButton(action=PostbackAction(label="はい", data="action=confirm_profile&res=yes", display_text="はい")),
+        QuickReplyButton(action=PostbackAction(label="やり直す", data="action=confirm_profile&res=no", display_text="やり直す"))
+    ]
+    line_bot_api.push_message(user_id, TextSendMessage(text=text, quick_reply=QuickReply(items=buttons)))
+
 def build_user_profile(user_data: dict) -> dict:
     profile = {"name": user_data.get("name", "あなた")}
     if "birth_date" in user_data:
@@ -82,50 +90,84 @@ def process_and_push_reply(user_id: str, user_text: str, motif_label: Optional[s
         # 1. リセット
         if user_text == "リセット":
             user_ref.delete()
-            line_bot_api.push_message(user_id, TextSendMessage(text="ようこそ、探究者の方。新たな観測を始めましょう。\nまずは、あなた様のお名前を教えてください。（『〇〇です』などは付けず、お呼びするお名前のみを送信してください）"))
+            line_bot_api.push_message(user_id, TextSendMessage(text="ようこそ、探究者の方。新たな観測を始めましょう。\nまずは、あなた様をどのようにお呼びすればよろしいですか？（『〇〇です』などは付けず、お呼びするお名前のみを送信してください）"))
             return
 
-        # 2. 名前登録（「○○です」などの語尾を削除して登録）
+        # 2. 名前登録
         if not user_name:
             clean_name = re.sub(r"(です|と申します|だよ|と申す|だ|といいます|って呼びます|って呼んで)$", "", user_text).strip()
             user_ref.set({"name": clean_name}, merge=True)
             send_birthday_picker(user_id, f"……{clean_name}様ですね。心に刻みました。次に、あなたの生まれた日を教えてください。")
             return
 
-        # 3. 生年月日・時刻登録
-        if not user_data.get("birth_date"):
-            if selected_date:
-                user_ref.set({"birth_date": selected_date}, merge=True)
-                send_time_picker(user_id)
-            else: send_birthday_picker(user_id, f"{user_name}様。観測を始める前に、生まれた日を教えてください。")
-            return
+        # 3. 生年月日・時刻の登録と確認フロー
+        if not user_data.get("is_profile_confirmed"):
+            if not user_data.get("birth_date"):
+                if selected_date:
+                    user_ref.set({"birth_date": selected_date}, merge=True)
+                    send_time_picker(user_id)
+                else: 
+                    send_birthday_picker(user_id, f"{user_name}様。観測を始める前に、生まれた日を教えてください。")
+                return
 
-        if user_data.get("birth_hour") is None:
-            if selected_time: 
-                user_ref.set({"birth_hour": int(selected_time.split(":")[0])}, merge=True)
+            if user_data.get("birth_hour") is None:
+                if selected_time: 
+                    h = int(selected_time.split(":")[0])
+                    user_ref.set({"birth_hour": h}, merge=True)
+                    send_profile_confirm(user_id, user_data.get("birth_date"), f"{h}時頃")
+                elif user_text == "UNKNOWN_TIME": 
+                    user_ref.set({"birth_hour": 12}, merge=True)
+                    send_profile_confirm(user_id, user_data.get("birth_date"), "不明（正午として計算）")
+                else: 
+                    send_time_picker(user_id)
+                return
+
+            if user_text == "CONFIRM_YES":
+                user_ref.set({"is_profile_confirmed": True}, merge=True)
                 line_bot_api.push_message(user_id, TextSendMessage(text=f"刻印が完成しました。今、{user_name}様が一番視たいことは何でしょうか。"))
-            elif user_text == "UNKNOWN_TIME": 
-                user_ref.set({"birth_hour": 12}, merge=True)
-                line_bot_api.push_message(user_id, TextSendMessage(text=f"承知いたしました。では、今{user_name}様が視たいことは何でしょうか。"))
-            else: send_time_picker(user_id)
-            return
+                return
+            elif user_text == "CONFIRM_NO":
+                user_ref.set({"birth_date": None, "birth_hour": None}, merge=True)
+                send_birthday_picker(user_id, "承知いたしました。では、もう一度生まれた日を正しく教えてください。")
+                return
+            else:
+                send_profile_confirm(user_id, user_data.get("birth_date"), f"{user_data.get('birth_hour')}時頃" if user_data.get("birth_hour") != 12 else "不明（正午として計算）")
+                return
 
-        # 4. 深掘り・モチーフ提示フェーズ
+        # 4. 「新たなる観測」確認 ＆ 深掘りフェーズ
         if not user_data.get("is_dialogue_mode") and motif_label is None:
+            
+            # 再開ボタン（はい/いいえ）の処理
+            if user_text == "RESTART_YES":
+                user_text = user_data.get("temp_restart_text", "これからの運勢")
+                user_ref.set({"temp_restart_text": None}, merge=True)
+            elif user_text == "RESTART_NO":
+                user_ref.set({"temp_restart_text": None}, merge=True)
+                line_bot_api.push_message(user_id, TextSendMessage(text="承知いたしました。私はまた淵にてお待ちしております。"))
+                return
+            elif not user_data.get("pending_consult") and not user_data.get("temp_category"):
+                # 通常の入力が来た場合、まずは「始めるか」を確認する
+                user_ref.set({"temp_restart_text": user_text}, merge=True)
+                buttons = [
+                    QuickReplyButton(action=PostbackAction(label="はい", data="action=restart&res=yes", display_text="はい")),
+                    QuickReplyButton(action=PostbackAction(label="いいえ", data="action=restart&res=no", display_text="いいえ"))
+                ]
+                line_bot_api.push_message(user_id, TextSendMessage(text="新たなる観測を始めますか？", quick_reply=QuickReply(items=buttons)))
+                return
+
+            # 「はい」が押された後の深掘り処理
             if user_data.get("temp_category"):
-                # 深掘りへの回答を受け取った
                 combined_consult = f"{user_data['temp_category']}（詳細：{user_text}）"
-                user_ref.update({"pending_consult": combined_consult, "temp_category": firestore.DELETE_FIELD})
+                user_ref.set({"pending_consult": combined_consult, "temp_category": None}, merge=True)
             elif not user_data.get("pending_consult"):
-                # 新しい相談（15文字以下の場合は深掘りする）
                 if len(user_text) <= 15:
-                    user_ref.update({"temp_category": user_text})
+                    user_ref.set({"temp_category": user_text}, merge=True)
                     line_bot_api.push_message(user_id, TextSendMessage(text=f"……「{user_text}」についてですね。その奥にある想いを、もう少しだけ詳しく教えていただけますか？\n（具体的な状況や、今感じている不安などを教えていただけると、より深く観測できます）"))
                     return
                 else:
-                    user_ref.update({"pending_consult": user_text})
+                    user_ref.set({"pending_consult": user_text}, merge=True)
 
-            # モチーフをランダムに4つ提示
+            # モチーフの提示
             sampled = random.sample(ALL_MOTIFS, 4)
             buttons = [QuickReplyButton(action=PostbackAction(label=m, data=f"action=select_motif&label={m}", display_text=m)) for m in sampled]
             line_bot_api.push_message(user_id, TextSendMessage(text="準備は整いました。心に触れる象徴を一つ選んでください。", quick_reply=QuickReply(items=buttons)))
@@ -138,27 +180,25 @@ def process_and_push_reply(user_id: str, user_text: str, motif_label: Optional[s
             
             result = oracle_engine.predict(profile, consult_text, motif_label, is_dialogue=False)
             
-            user_ref.update({"is_dialogue_mode": True, "chat_history": f"識の神託: {result['message']}\n", "last_motif": motif_label, "pending_consult": firestore.DELETE_FIELD})
+            user_ref.set({"is_dialogue_mode": True, "chat_history": f"識の神託: {result['message']}\n", "last_motif": motif_label, "pending_consult": None}, merge=True)
             line_bot_api.push_message(user_id, TextSendMessage(text=result["message"]))
             return
 
         # 6. 対話・カウンセリングモード
         if user_data.get("is_dialogue_mode"):
             history = user_data.get("chat_history", "")
-            
-            # ここがエラーの原因でした！完全なprofileを渡すように修正しました。
             profile = build_user_profile(user_data)
             
             result = oracle_engine.predict(profile, user_text, user_data.get("last_motif", "静かなる光"), is_dialogue=True, chat_history=history)
             reply_text = result["message"]
 
-            # AIが「終了」と判断したかのフラグチェック
             if "[END_SESSION]" in reply_text:
                 reply_text = reply_text.replace("[END_SESSION]", "").strip()
-                user_ref.update({"is_dialogue_mode": False, "chat_history": ""})
+                # 終了時は確実に初期化（Noneをセットしてエラーを防ぐ）
+                user_ref.set({"is_dialogue_mode": False, "chat_history": None, "temp_category": None, "pending_consult": None, "temp_restart_text": None}, merge=True)
                 line_bot_api.push_message(user_id, TextSendMessage(text=reply_text))
             else:
-                user_ref.update({"chat_history": history + f"{user_name}: {user_text}\n識: {reply_text}\n"})
+                user_ref.set({"chat_history": history + f"{user_name}: {user_text}\n識: {reply_text}\n"}, merge=True)
                 line_bot_api.push_message(user_id, TextSendMessage(text=reply_text))
             return
 
@@ -187,7 +227,14 @@ def handle_message(event: MessageEvent):
 def handle_postback(event: PostbackEvent):
     user_id = event.source.user_id
     query = dict(x.split('=') for x in event.postback.data.split('&'))
-    if query.get("action") == "select_motif":
+    
+    if query.get("action") == "confirm_profile":
+        text_val = "CONFIRM_YES" if query.get("res") == "yes" else "CONFIRM_NO"
+        threading.Thread(target=process_and_push_reply, args=(user_id, text_val)).start()
+    elif query.get("action") == "restart":
+        text_val = "RESTART_YES" if query.get("res") == "yes" else "RESTART_NO"
+        threading.Thread(target=process_and_push_reply, args=(user_id, text_val)).start()
+    elif query.get("action") == "select_motif":
         threading.Thread(target=process_and_push_reply, args=(user_id, "", query.get("label"))).start()
     elif query.get("action") == "set_birthday":
         threading.Thread(target=process_and_push_reply, args=(user_id, "", None, event.postback.params.get("date"))).start()
