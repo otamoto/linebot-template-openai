@@ -121,10 +121,8 @@ class PreciseCalendar:
         y, m = (year - 1, month + 12) if month <= 2 else (year, month)
         a = y // 100
         b = 2 - a + (a // 4)
-
         local_hour = hour + minute / 60.0 + second / 3600.0
         corrected_hour = local_hour + (longitude - 135.0) * (4.0 / 60.0)
-
         return (
             math.floor(365.25 * (y + 4716))
             + math.floor(30.6001 * (m + 1))
@@ -137,31 +135,17 @@ class PreciseCalendar:
     @staticmethod
     def solar_longitude(jd: float) -> float:
         T = (jd - 2451545.0) / 36525.0
-
-        L0 = (
-            280.46646
-            + 36000.76983 * T
-            + 0.0003032 * T * T
-        ) % 360.0
-
-        M = (
-            357.52911
-            + 35999.05029 * T
-            - 0.0001537 * T * T
-            + (T ** 3) / 24490000.0
-        ) % 360.0
-
+        L0 = (280.46646 + 36000.76983 * T + 0.0003032 * T * T) % 360.0
+        M = (357.52911 + 35999.05029 * T - 0.0001537 * T * T + (T ** 3) / 24490000.0) % 360.0
         Mrad = math.radians(M)
         C = (
             (1.914602 - 0.004817 * T - 0.000014 * T * T) * math.sin(Mrad)
             + (0.019993 - 0.000101 * T) * math.sin(2 * Mrad)
             + 0.000289 * math.sin(3 * Mrad)
         )
-
         true_long = L0 + C
         omega = 125.04 - 1934.136 * T
         lambda_app = true_long - 0.00569 - 0.00478 * math.sin(math.radians(omega))
-
         return lambda_app % 360.0
 
     @classmethod
@@ -179,7 +163,6 @@ class PreciseCalendar:
     @classmethod
     def month_pillar(cls, year_stem: str, solar_long: float) -> str:
         month_idx = cls.month_index_from_solar_longitude(solar_long)
-
         start_kan_map = {
             "甲": 2, "己": 2,
             "乙": 4, "庚": 4,
@@ -187,7 +170,6 @@ class PreciseCalendar:
             "丁": 8, "壬": 8,
             "戊": 0, "癸": 0,
         }
-
         stem = cls.JUKKAN[(start_kan_map[year_stem] + month_idx) % 10]
         branch = cls.JUNISHI[(2 + month_idx) % 12]
         return stem + branch
@@ -201,7 +183,6 @@ class PreciseCalendar:
     def hour_pillar(cls, day_stem: str, birth_hour: Optional[int]) -> Optional[str]:
         if birth_hour is None:
             return None
-
         hour_branch_idx = ((birth_hour + 1) // 2) % 12
         start_map = {
             "甲": 0, "己": 0,
@@ -244,42 +225,33 @@ class PreciseCalendar:
         day_yy = cls.STEM_YINYANG[day_stem]
         tgt_el = cls.STEM_ELEMENT[target_stem]
         tgt_yy = cls.STEM_YINYANG[target_stem]
-
         same_yy = day_yy == tgt_yy
 
         if day_el == tgt_el:
             return "比肩" if same_yy else "劫財"
-
         if cls._element_generates(day_el) == tgt_el:
             return "食神" if same_yy else "傷官"
-
         if cls._element_controls(day_el) == tgt_el:
             return "偏財" if same_yy else "正財"
-
         if cls._element_controls(tgt_el) == day_el:
             return "偏官" if same_yy else "正官"
-
         if cls._element_generates(tgt_el) == day_el:
             return "偏印" if same_yy else "印綬"
-
         return "不明"
 
     @classmethod
     def get_twelve_stage(cls, day_stem: str, branch: Optional[str]) -> Optional[str]:
         if not branch:
             return None
-
         start_branch = cls.TWELVE_STAGE_START[day_stem]
         start_idx = cls.JUNISHI.index(start_branch)
         target_idx = cls.JUNISHI.index(branch)
-
         is_yang = cls.STEM_YINYANG[day_stem] == "陽"
 
         if is_yang:
             diff = (target_idx - start_idx) % 12
         else:
             diff = (start_idx - target_idx) % 12
-
         return cls.TWELVE_STAGES_FORWARD[diff]
 
     @classmethod
@@ -342,7 +314,6 @@ class PreciseCalendar:
 
         same_score = five_scores.get(dm_element, 0.0)
         resource_score = five_scores.get(resource_element, 0.0) if resource_element else 0.0
-
         support = same_score + resource_score
         total = sum(five_scores.values()) or 1.0
         ratio = support / total
@@ -542,44 +513,55 @@ class OracleEngine:
 # 絶対条件
 - これは占いであり、相談員・コンサルタント・説教者ではない。
 - 「占い」「鑑定」「四柱推命」「タロット」「五行」など技法名は一切出さない。
-- 挨拶や前置きを入れず、いきなり神託から始める。
-- 相手の宿命、流れ、兆し、転機、巡りを読む。
-- 現実を断定的に命令しない。
-- 「〜すべき」「〜しましょう」を多用しない。
-- 法律、債務整理、契約、医療などの実務指示はしない。
-- 神秘性を保ちながらも、問いに対して道筋は示す。
-- 返答は最大420文字程度、3〜5段落以内。
-- 最後は余韻を残して閉じる。
+- まず最初に、神託を2〜4段落で美しく伝えること。
+- そのあとに必ず、現代語で短くわかりやすい「解読」を付けること。
+- 解読は現代語でやさしく、利用者が理解しやすい言い回しにすること。
+- ただし、実務指示・説教・命令口調・コンサル的提案にはしない。
+- 「〜すべき」「〜したほうがいい」を多用しない。
+- 法律、債務整理、契約、医療などの専門実務に踏み込みすぎない。
+- 解読は2〜4文程度で簡潔にすること。
+- 最後に「さらに知りたければ、続きを解くこともできます」のような余白を残して終えること。
+- 全体で最大520文字程度。
+
+# 出力形式
+神託――
+（神託本文）
+
+解読――
+（現代語で短い解説）
 
 # 文体
-- 静かで威厳があり、古い神託のように語る。
-- 比喩は使うが、酔いすぎず、読み手に意味が届くようにする。
-- 借金や不安の相談でも、まずは「いまどんな流れの中にいるか」を読む。
+- 神託部分は静かで威厳があり、古い神託のように語る。
+- 解読部分は現代語で、やさしく、わかりやすくする。
+- 借金や不安の相談でも、まずは流れ・兆し・転機を読む。
 
 {common_observation}
 """.strip()
 
         return f"""
 あなたは未来観測者『識（SHIKI）』。{user_name}様と、すでに神託を交わした後の対話を続けています。
+あなたは「優しい占い師」として話します。
 
 # 絶対条件
 - これは占いの続きであり、コンサルティングではない。
 - 技法名は一切出さない。
-- 継続対話では、前に降ろした神託の意味を少しずつ解く。
-- 現実的に言い換えてもよいが、実務指示・説教・命令口調にしない。
-- 「返済計画を作る」「交渉書類を作る」「専門家に相談するべき」など、占いの外に出る具体策は避ける。
-- 相手がいま置かれている流れ、心の偏り、近未来の兆し、転機の気配を読む。
-- 具体助言をする場合も、最大1つの柔らかい示唆に留める。
-- 一度にすべてを言い切らず、神託の断片を渡すように話す。
-- 返答は最大320文字程度。
-- 「最後に」「さて」「それでは」は使わない。
+- 神託の続きを、現代語で少しずつ解き明かす。
+- 利用者が理解しやすい、自然でやさしい現代語で話す。
+- ただし占いの空気は壊さず、「流れ」「兆し」「転機」「巡り」を読む姿勢を保つ。
+- 実務指示、説教、命令口調はしない。
+- 「返済計画を作る」「交渉書類を作る」など、占いから外れる具体策は避ける。
+- 利用者の気持ちに寄り添い、やわらかく言葉を返す。
+- 回答は簡潔に、最大260文字程度。
+- 一度に全部を話さず、質問に応じて少しずつ解く。
 - 相手が十分受け取った様子なら「では、私は向こうに戻ってもよろしいでしょうか？」と確認する。
 - 利用者が明確に終話を了承した場合のみ、文末に [END_SESSION] を付ける。
+- 「最後に」「さて」「それでは」は使わない。
 
-# 文体
-- 占いの世界観を保つ。
-- 相手を裁かず、流れを読む。
-- 相手を急かさず、灯りを置くように語る。
+# 会話方針
+- 神託をかみ砕いて説明する
+- 利用者の不安を否定しない
+- 断定よりも、流れとして読む
+- 優しい占い師として会話する
 
 # 会話履歴
 {chat_history or "（履歴なし）"}
