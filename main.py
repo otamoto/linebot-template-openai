@@ -12,8 +12,8 @@ from fastapi.responses import JSONResponse
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, 
-    QuickReply, QuickReplyButton, MessageAction, PostbackAction,
-    DatetimePickerAction, TemplateSendMessage, ButtonsTemplate, PostbackEvent
+    QuickReply, QuickReplyButton, PostbackAction, PostbackEvent,
+    DatetimePickerAction, TemplateSendMessage, ButtonsTemplate
 )
 from linebot.exceptions import InvalidSignatureError
 from google import genai
@@ -46,15 +46,11 @@ db = firestore.client()
 
 oracle_engine = OracleEngine(gemini_client=genai_client, model_name=CHAT_MODEL)
 
-# モチーフ定義
-MOTIFS = {
-    "silver_key": "銀の鍵",
-    "hourglass": "砂時計",
-    "ancient_mirror": "古びた鏡",
-    "holy_drop": "聖なる滴"
-}
+MOTIFS = {"silver_key": "銀の鍵", "hourglass": "砂時計", "ancient_mirror": "古びた鏡", "holy_drop": "聖なる滴"}
 
-# ユーティリティ
+# -------------------------
+# ユーティリティ & UI
+# -------------------------
 def normalize_text(text: str) -> str:
     return unicodedata.normalize("NFKC", (text or "").strip())
 
@@ -64,10 +60,8 @@ def build_user_profile(user_data: dict) -> dict:
     profile = {"birth_year": y, "birth_month": m, "birth_day": d}
     if user_data.get("birth_hour") is not None:
         profile["birth_hour"] = int(user_data["birth_hour"])
-        profile["birth_minute"] = int(user_data.get("birth_minute", 0))
     return profile
 
-# UI送信関数
 def send_birthday_picker(user_id: str, message: str):
     date_picker = ButtonsTemplate(
         text=message,
@@ -85,17 +79,21 @@ def send_time_picker(user_id: str):
     )
     line_bot_api.push_message(user_id, TemplateSendMessage(alt_text="出生時間を選択", template=time_picker))
 
+# -------------------------
 # メイン返信ロジック
+# -------------------------
 def process_and_push_reply(user_id: str, user_text: str, motif_id: Optional[str] = None, selected_date: Optional[str] = None, selected_time: Optional[str] = None) -> None:
     try:
         user_ref = db.collection("users").document(user_id)
         user_data = user_ref.get().to_dict() or {}
 
+        # 1. リセット
         if user_text == "リセット":
             user_ref.delete()
             send_birthday_picker(user_id, "すべての記録を虚空へ返しました。新たな観測を始めましょう。あなたの生まれた日はいつですか？")
             return
 
+        # 2. 登録フロー
         if not user_data.get("birth_date"):
             if selected_date:
                 user_ref.set({"birth_date": selected_date}, merge=True)
@@ -107,37 +105,68 @@ def process_and_push_reply(user_id: str, user_text: str, motif_id: Optional[str]
         if user_data.get("birth_hour") is None:
             if selected_time:
                 h, m = map(int, selected_time.split(":"))
-                user_ref.set({"birth_hour": h, "birth_minute": m}, merge=True)
+                user_ref.set({"birth_hour": h}, merge=True)
                 line_bot_api.push_message(user_id, TextSendMessage(text="刻印が完成しました。今、あなたが一番視たいことを教えてください。"))
             elif user_text == "UNKNOWN_TIME":
-                user_ref.set({"birth_hour": 12, "birth_minute": 0}, merge=True)
-                line_bot_api.push_message(user_id, TextSendMessage(text="承知いたしました。では、日時の重なりを中心に観測します。今、あなたが一番視たいことを教えてください。"))
+                user_ref.set({"birth_hour": 12}, merge=True)
+                line_bot_api.push_message(user_id, TextSendMessage(text="承知いたしました。では、今あなたが一番視たいことを教えてください。"))
             else:
                 send_time_picker(user_id)
             return
 
-        if not motif_id:
-            user_ref.set({"pending_consult": user_text}, merge=True)
-            buttons = [QuickReplyButton(action=PostbackAction(label=label, data=f"action=select_motif&id={m_id}", display_text=label)) for m_id, label in MOTIFS.items()]
-            line_bot_api.push_message(user_id, TextSendMessage(text="準備は整いました。あなたの直感を重ねます。いま、心に触れる象徴を一つ選んでください。", quick_reply=QuickReply(items=buttons)))
+        # 3. モチーフ選択 & 鑑定実行
+        if motif_id:
+            motif_label = MOTIFS.get(motif_id, "静かなる光")
+            profile = build_user_profile(user_data)
+            consult_text = user_data.get("pending_consult", "これからの運勢")
+            
+            result = oracle_engine.predict(profile, consult_text, motif_label, is_dialogue=False)
+            
+            # 初回鑑定を保存して対話モードへ
+            user_ref.update({
+                "is_dialogue_mode": True,
+                "chat_history": f"識の神託: {result['message']}\n",
+                "last_motif_label": motif_label,
+                "dialogue_count": 1,
+                "pending_consult": firestore.DELETE_FIELD
+            })
+            line_bot_api.push_message(user_id, TextSendMessage(text=result["message"]))
             return
 
-        # 鑑定実行
-        profile = build_user_profile(user_data)
-        consult_text = user_data.get("pending_consult", "これからの運勢")
-        motif_label = MOTIFS.get(motif_id, "静かなる光") # IDをラベルに変換
-        
-        result = oracle_engine.predict(profile, {"stress": 0.5}, consult_text, motif_label)
-        
-        line_bot_api.push_message(user_id, TextSendMessage(text=result.get("message", "……識の声が途切れました。")))
-        user_ref.update({"pending_consult": firestore.DELETE_FIELD})
+        # 4. 対話モード（2回目以降）
+        if user_data.get("is_dialogue_mode"):
+            profile = build_user_profile(user_data)
+            history = user_data.get("chat_history", "")
+            motif_label = user_data.get("last_motif_label", "静かなる光")
+            count = user_data.get("dialogue_count", 1)
+
+            result = oracle_engine.predict(profile, user_text, motif_label, is_dialogue=True, chat_history=history)
+            
+            new_history = history + f"あなた: {user_text}\n識: {result['message']}\n"
+            
+            # クローズ判定（キーワード or 往復回数）
+            close_keywords = ["ありがとう", "助かりました", "わかりました", "さようなら", "バイバイ", "やってみる"]
+            is_closing = any(k in user_text for k in close_keywords) or count >= 5
+            
+            if is_closing:
+                user_ref.update({"is_dialogue_mode": False, "chat_history": "", "dialogue_count": 0})
+            else:
+                user_ref.update({"chat_history": new_history, "dialogue_count": count + 1})
+            
+            line_bot_api.push_message(user_id, TextSendMessage(text=result["message"]))
+            return
+
+        # 5. 通常相談受付（モチーフ提示）
+        user_ref.set({"pending_consult": user_text}, merge=True)
+        buttons = [QuickReplyButton(action=PostbackAction(label=label, data=f"action=select_motif&id={m_id}", display_text=label)) for m_id, label in MOTIFS.items()]
+        line_bot_api.push_message(user_id, TextSendMessage(text="準備は整いました。心に触れる象徴を一つ選んでください。", quick_reply=QuickReply(items=buttons)))
 
     except Exception:
-        logger.exception("process_and_push_reply error")
+        logger.exception("Error")
         line_bot_api.push_message(user_id, TextSendMessage(text="識の視界が揺らぎました。少し間を置いてください。"))
 
 # -------------------------
-# LINE Callback & Event Handler
+# サーバー & コールバック
 # -------------------------
 @app.post("/callback")
 async def callback(request: Request):
@@ -154,7 +183,7 @@ def handle_text_message(event: MessageEvent):
     user_id = event.source.user_id
     user_text = normalize_text(event.message.text)
     if user_text:
-        threading.Thread(target=process_and_push_reply, args=(user_id, user_text), daemon=True).start()
+        threading.Thread(target=process_and_push_reply, args=(user_id, user_text)).start()
 
 @handler.add(PostbackEvent)
 def handle_postback(event: PostbackEvent):
@@ -162,13 +191,13 @@ def handle_postback(event: PostbackEvent):
     query = dict(x.split('=') for x in event.postback.data.split('&'))
     
     if query.get("action") == "select_motif":
-        threading.Thread(target=process_and_push_reply, args=(user_id, "", query.get("id")), daemon=True).start()
+        threading.Thread(target=process_and_push_reply, args=(user_id, "", query.get("id"))).start()
     elif query.get("action") == "set_birthday":
-        threading.Thread(target=process_and_push_reply, args=(user_id, "", None, event.postback.params.get("date")), daemon=True).start()
+        threading.Thread(target=process_and_push_reply, args=(user_id, "", None, event.postback.params.get("date"))).start()
     elif query.get("action") == "set_birthtime":
-        threading.Thread(target=process_and_push_reply, args=(user_id, "", None, None, event.postback.params.get("time")), daemon=True).start()
+        threading.Thread(target=process_and_push_reply, args=(user_id, "", None, None, event.postback.params.get("time"))).start()
     elif query.get("action") == "set_birthtime_unknown":
-        threading.Thread(target=process_and_push_reply, args=(user_id, "UNKNOWN_TIME"), daemon=True).start()
+        threading.Thread(target=process_and_push_reply, args=(user_id, "UNKNOWN_TIME")).start()
 
 if __name__ == "__main__":
     import uvicorn
