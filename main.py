@@ -19,6 +19,7 @@ from google import genai
 import firebase_admin
 from firebase_admin import credentials, firestore
 from oracle_engine import OracleEngine
+from typing import Optional
 
 # 初期化
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s : %(message)s")
