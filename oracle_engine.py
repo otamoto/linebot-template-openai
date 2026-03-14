@@ -441,12 +441,12 @@ class OracleEngine:
 
     def __init__(
         self,
-        gemini_client,
+        openai_client,
         model_name: Optional[str] = None,
     ):
-        self.genai_client = gemini_client
+        self.openai_client = openai_client
         self.cal = PreciseCalendar()
-        self.model_name = model_name or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        self.model_name = model_name or os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
     @staticmethod
     def _stable_seed(
@@ -462,40 +462,42 @@ class OracleEngine:
         return int(hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
 
     @staticmethod
-    def _safe_text(response: Any) -> str:
-        text = getattr(response, "text", None)
+    def _extract_text_from_response(response: Any) -> str:
+        text = getattr(response, "output_text", None)
         if text and str(text).strip():
             return str(text).strip()
 
-        candidates = getattr(response, "candidates", None)
-        if candidates:
-            try:
-                parts = []
-                for cand in candidates:
-                    content = getattr(cand, "content", None)
-                    if not content:
-                        continue
-                    for part in getattr(content, "parts", None) or []:
-                        t = getattr(part, "text", None)
+        try:
+            outputs = getattr(response, "output", None) or []
+            chunks = []
+            for item in outputs:
+                content = getattr(item, "content", None) or []
+                for c in content:
+                    if getattr(c, "type", None) == "output_text":
+                        t = getattr(c, "text", None)
                         if t:
-                            parts.append(t)
-                merged = "\n".join(parts).strip()
-                if merged:
-                    return merged
-            except Exception:
-                pass
+                            chunks.append(t)
+            merged = "\n".join(chunks).strip()
+            if merged:
+                return merged
+        except Exception:
+            pass
 
         return "……時の帳がまだ閉じています。"
 
     @staticmethod
     def _extract_usage_metadata(response: Any) -> Dict[str, Any]:
         try:
-            usage = getattr(response, "usage_metadata", None)
+            usage = getattr(response, "usage", None)
             if usage is None:
                 return {}
-            if hasattr(usage, "__dict__"):
-                return dict(usage.__dict__)
-            return {"raw": str(usage)}
+
+            out: Dict[str, Any] = {}
+            for key in ["input_tokens", "output_tokens", "total_tokens"]:
+                val = getattr(usage, key, None)
+                if val is not None:
+                    out[key] = val
+            return out
         except Exception:
             return {}
 
@@ -632,12 +634,12 @@ class OracleEngine:
                 self.model_name, user_name, motif_label, is_dialogue
             )
 
-            response = self.genai_client.models.generate_content(
+            response = self.openai_client.responses.create(
                 model=self.model_name,
-                contents=prompt,
+                input=prompt,
             )
 
-            message = self._safe_text(response)
+            message = self._extract_text_from_response(response)
             usage_metadata = self._extract_usage_metadata(response)
 
             logger.info(
@@ -687,8 +689,17 @@ class OracleEngine:
 
         except Exception as e:
             logger.exception("OracleEngine Error")
+            msg = str(e)
+
+            if "429" in msg or "rate limit" in msg.lower():
+                return {
+                    "message": "いま観測が集中しており、しばらく扉が閉じています。少し時間を置いて、もう一度声をかけてください。",
+                    "summary": {},
+                    "topic": "quota_error",
+                }
+
             return {
-                "message": f"観測の視界が一時的に曇りました。({str(e)[:120]})",
+                "message": f"観測の視界が一時的に曇りました。({msg[:120]})",
                 "summary": {},
                 "topic": "error",
             }
