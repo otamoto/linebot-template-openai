@@ -4,3 +4,4 @@ line-bot-sdk
 firebase-admin
 google-genai
 gunicorn
+openai>=1.99.0
