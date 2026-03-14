@@ -627,6 +627,11 @@ class OracleEngine:
                 chat_history=chat_history,
             )
 
+            logger.info(
+                "OracleEngine predict start model=%s user=%s motif=%s dialogue=%s",
+                self.model_name, user_name, motif_label, is_dialogue
+            )
+
             response = self.genai_client.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
@@ -634,6 +639,11 @@ class OracleEngine:
 
             message = self._safe_text(response)
             usage_metadata = self._extract_usage_metadata(response)
+
+            logger.info(
+                "OracleEngine predict success model=%s usage=%s",
+                self.model_name, usage_metadata
+            )
 
             return {
                 "message": message,
@@ -675,10 +685,10 @@ class OracleEngine:
                 "topic": "dialogue" if is_dialogue else "oracle",
             }
 
-        except Exception:
+        except Exception as e:
             logger.exception("OracleEngine Error")
             return {
-                "message": "観測の視界が一時的に曇りました。",
+                "message": f"観測の視界が一時的に曇りました。({str(e)[:120]})",
                 "summary": {},
                 "topic": "error",
             }
