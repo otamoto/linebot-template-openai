@@ -37,9 +37,6 @@ from firebase_admin.firestore import DELETE_FIELD
 from oracle_engine import OracleEngine
 
 
-# =========================================================
-# 基本設定
-# =========================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s : %(message)s",
@@ -49,9 +46,6 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="SHIKI LINE Bot")
 
 
-# =========================================================
-# 定数
-# =========================================================
 PHASE_WAIT_NAME = "waiting_name"
 PHASE_WAIT_BIRTH_DATE = "waiting_birth_date"
 PHASE_WAIT_BIRTH_TIME = "waiting_birth_time"
@@ -82,9 +76,6 @@ ALL_MOTIFS = [
 ]
 
 
-# =========================================================
-# 環境変数
-# =========================================================
 def require_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -99,18 +90,12 @@ FIREBASE_SERVICE_ACCOUNT_JSON = require_env("FIREBASE_SERVICE_ACCOUNT_JSON")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
 
-# =========================================================
-# 外部サービス初期化
-# =========================================================
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 if not firebase_admin._apps:
-    try:
-        key_dict = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
-    except json.JSONDecodeError as e:
-        raise RuntimeError("FIREBASE_SERVICE_ACCOUNT_JSON が正しいJSONではありません") from e
+    key_dict = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
     firebase_admin.initialize_app(credentials.Certificate(key_dict))
 
 db = firestore.client()
@@ -120,9 +105,6 @@ oracle_engine = OracleEngine(
 )
 
 
-# =========================================================
-# ユーザー単位ロック
-# =========================================================
 _user_locks: Dict[str, threading.Lock] = {}
 _user_locks_guard = threading.Lock()
 
@@ -134,9 +116,6 @@ def get_user_lock(user_id: str) -> threading.Lock:
         return _user_locks[user_id]
 
 
-# =========================================================
-# ユーティリティ
-# =========================================================
 def normalize_text(text: str) -> str:
     return unicodedata.normalize("NFKC", (text or "").strip())
 
@@ -503,18 +482,12 @@ def process_and_push_reply(
     with lock:
         try:
             user_data = load_user(user_id)
-
             text = normalize_text(user_text)
             phase = user_data.get("phase", PHASE_WAIT_NAME)
 
             logger.info(
                 "process start user_id=%s phase=%s text=%s motif=%s date=%s time=%s",
-                user_id,
-                phase,
-                text,
-                motif_label,
-                selected_date,
-                selected_time,
+                user_id, phase, text, motif_label, selected_date, selected_time
             )
 
             if text == "リセット":
@@ -530,10 +503,7 @@ def process_and_push_reply(
             if text == "決済完了":
                 save_user(
                     user_id,
-                    {
-                        "plan_status": "paid",
-                        "phase": PHASE_WAIT_RESTART_CONFIRM,
-                    },
+                    {"plan_status": "paid", "phase": PHASE_WAIT_RESTART_CONFIRM},
                 )
                 push_text(user_id, "決済完了として記録しました。では、改めて今視たいことを教えてください。")
                 return
@@ -563,13 +533,7 @@ def process_and_push_reply(
 
             if phase == PHASE_WAIT_BIRTH_DATE:
                 if selected_date:
-                    save_user(
-                        user_id,
-                        {
-                            "birth_date": selected_date,
-                            "phase": PHASE_WAIT_BIRTH_TIME,
-                        },
-                    )
+                    save_user(user_id, {"birth_date": selected_date, "phase": PHASE_WAIT_BIRTH_TIME})
                     send_time_picker(user_id)
                     return
 
@@ -637,13 +601,7 @@ def process_and_push_reply(
                     yn = normalize_yes_no(text)
 
                 if yn == "yes":
-                    save_user(
-                        user_id,
-                        {
-                            "is_profile_confirmed": True,
-                            "phase": PHASE_WAIT_RESTART_CONFIRM,
-                        },
-                    )
+                    save_user(user_id, {"is_profile_confirmed": True, "phase": PHASE_WAIT_RESTART_CONFIRM})
                     push_text(
                         user_id,
                         f"刻印が完成しました。今、{user_data.get('name', PROFILE_DEFAULT_NAME)}様が一番視たいことは何でしょうか。"
@@ -651,21 +609,12 @@ def process_and_push_reply(
                     return
 
                 if yn == "no":
-                    save_user(
-                        user_id,
-                        {
-                            "is_profile_confirmed": False,
-                            "phase": PHASE_WAIT_BIRTH_DATE,
-                        },
-                    )
+                    save_user(user_id, {"is_profile_confirmed": False, "phase": PHASE_WAIT_BIRTH_DATE})
                     delete_user_fields(
                         user_id,
                         ["birth_date", "birth_hour", "birth_minute", "birth_second", "birth_time_unknown"]
                     )
-                    send_birthday_picker(
-                        user_id,
-                        "承知いたしました。では、もう一度生まれた日を正しく教えてください。"
-                    )
+                    send_birthday_picker(user_id, "承知いたしました。では、もう一度生まれた日を正しく教えてください。")
                     return
 
                 send_profile_confirm(
@@ -705,10 +654,7 @@ def process_and_push_reply(
                     if len(consult_seed) <= 15:
                         save_user(
                             user_id,
-                            {
-                                "temp_category": consult_seed,
-                                "phase": PHASE_WAIT_CONSULT_DETAIL,
-                            },
+                            {"temp_category": consult_seed, "phase": PHASE_WAIT_CONSULT_DETAIL},
                         )
                         push_text(
                             user_id,
@@ -780,10 +726,7 @@ def process_and_push_reply(
                 required_keys = ["birth_year", "birth_month", "birth_day"]
                 missing = [k for k in required_keys if k not in profile]
                 if missing:
-                    logger.warning(
-                        "profile missing keys user_id=%s missing=%s profile=%s",
-                        user_id, missing, profile
-                    )
+                    logger.warning("profile missing keys user_id=%s missing=%s profile=%s", user_id, missing, profile)
                     push_text(user_id, "刻印に不足があるようです。リセットして、もう一度最初から刻印を整えてください。")
                     return
 
@@ -792,6 +735,9 @@ def process_and_push_reply(
                     "oracle start user_id=%s motif=%s consult=%s profile=%s",
                     user_id, motif_label, consult_text[:80], profile
                 )
+
+                # ここで一文入れる
+                push_text(user_id, "想いは届きました。神託を降ろしています。")
 
                 consume_session_credit_if_needed(user_id, user_data)
 
