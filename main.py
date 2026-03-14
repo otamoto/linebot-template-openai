@@ -8,6 +8,7 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from urllib.parse import parse_qsl
+from uuid import uuid4
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -59,6 +60,7 @@ PHASE_WAIT_RESTART_CONFIRM = "waiting_restart_confirm"
 PHASE_WAIT_CONSULT_DETAIL = "waiting_consult_detail"
 PHASE_WAIT_MOTIF = "waiting_motif"
 PHASE_DIALOGUE = "dialogue"
+PHASE_WAIT_PAYMENT = "waiting_payment"
 
 DEFAULT_UNKNOWN_HOUR = 12
 DEFAULT_UNKNOWN_MINUTE = 0
@@ -67,6 +69,10 @@ DEFAULT_BIRTH_LONGITUDE = float(os.getenv("DEFAULT_BIRTH_LONGITUDE", "135.0"))
 
 MAX_CHAT_HISTORY_CHARS = 5000
 PROFILE_DEFAULT_NAME = "あなた"
+
+DEFAULT_FREE_SESSIONS = int(os.getenv("DEFAULT_FREE_SESSIONS", "1"))
+PAYMENT_URL = os.getenv("PAYMENT_URL", "https://example.com/payment")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "SHIKI")
 
 ALL_MOTIFS = [
     "銀の鍵", "砂時計", "古びた鏡", "聖なる滴", "琥珀の蝶", "折れた剣", "青い月", "羅針盤", "封じられた手紙", "金の天秤",
@@ -229,6 +235,16 @@ def push_text(user_id: str, text: str, quick_reply: Optional[QuickReply] = None)
     line_bot_api.push_message(user_id, TextSendMessage(text=text, quick_reply=quick_reply))
 
 
+def get_payment_guide_text(user_data: Dict[str, Any]) -> str:
+    name = user_data.get("name", PROFILE_DEFAULT_NAME)
+    return (
+        f"{name}様の無料観測枠は使い切られています。\n"
+        f"より深い観測を続けるには有料プランをご利用ください。\n\n"
+        f"決済ページ: {PAYMENT_URL}\n\n"
+        "決済後に『決済完了』と送ってください。"
+    )
+
+
 def send_birthday_picker(user_id: str, message: str) -> None:
     template = ButtonsTemplate(
         text=message,
@@ -335,9 +351,27 @@ def get_user_ref(user_id: str):
     return db.collection("users").document(user_id)
 
 
+def get_sessions_ref(user_id: str):
+    return get_user_ref(user_id).collection("sessions")
+
+
+def get_session_ref(user_id: str, session_id: str):
+    return get_sessions_ref(user_id).document(session_id)
+
+
+def get_messages_ref(user_id: str, session_id: str):
+    return get_session_ref(user_id, session_id).collection("messages")
+
+
 def load_user(user_id: str) -> Dict[str, Any]:
     snap = get_user_ref(user_id).get()
     data = snap.to_dict() or {}
+
+    if "plan_status" not in data:
+        data["plan_status"] = "free"
+    if "free_sessions_remaining" not in data:
+        data["free_sessions_remaining"] = DEFAULT_FREE_SESSIONS
+
     if not data.get("phase"):
         if not data.get("name"):
             data["phase"] = PHASE_WAIT_NAME
@@ -351,6 +385,7 @@ def load_user(user_id: str) -> Dict[str, Any]:
             data["phase"] = PHASE_DIALOGUE
         else:
             data["phase"] = PHASE_WAIT_RESTART_CONFIRM
+
     return data
 
 
@@ -392,6 +427,70 @@ def log_usage_if_any(result: Dict[str, Any], user_id: str) -> None:
         logger.exception("usage log failed")
 
 
+def can_start_paid_reading(user_data: Dict[str, Any]) -> bool:
+    if user_data.get("plan_status") == "paid":
+        return True
+    return int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS)) > 0
+
+
+def consume_session_credit_if_needed(user_id: str, user_data: Dict[str, Any]) -> None:
+    if user_data.get("plan_status") == "paid":
+        return
+
+    remaining = int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS))
+    if remaining > 0:
+        save_user(user_id, {"free_sessions_remaining": remaining - 1})
+
+
+def create_new_session(user_id: str, user_data: Dict[str, Any], consult_text: str, motif_label: str) -> str:
+    session_id = str(uuid4())
+    session_doc = {
+        "session_id": session_id,
+        "user_name": user_data.get("name", PROFILE_DEFAULT_NAME),
+        "status": "active",
+        "plan_status": user_data.get("plan_status", "free"),
+        "motif_label": motif_label,
+        "initial_consult": consult_text,
+        "started_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    get_session_ref(user_id, session_id).set(session_doc, merge=True)
+    save_user(user_id, {"current_session_id": session_id})
+    return session_id
+
+
+def close_session(user_id: str, session_id: str) -> None:
+    get_session_ref(user_id, session_id).set(
+        {
+            "status": "closed",
+            "closed_at": now_iso(),
+            "updated_at": now_iso(),
+        },
+        merge=True,
+    )
+
+
+def append_session_message(
+    user_id: str,
+    session_id: str,
+    role: str,
+    text: str,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    message_id = str(uuid4())
+    payload = {
+        "message_id": message_id,
+        "role": role,
+        "text": text,
+        "created_at": now_iso(),
+    }
+    if extra:
+        payload.update(extra)
+
+    get_messages_ref(user_id, session_id).document(message_id).set(payload, merge=True)
+    get_session_ref(user_id, session_id).set({"updated_at": now_iso()}, merge=True)
+
+
 # =========================================================
 # 本体ロジック
 # =========================================================
@@ -421,9 +520,6 @@ def process_and_push_reply(
                 selected_time,
             )
 
-            # -------------------------------------------------
-            # 共通: リセット
-            # -------------------------------------------------
             if text == "リセット":
                 reset_user(user_id)
                 push_text(
@@ -434,9 +530,17 @@ def process_and_push_reply(
                 )
                 return
 
-            # -------------------------------------------------
-            # phase: 名前待ち
-            # -------------------------------------------------
+            if text == "決済完了":
+                save_user(
+                    user_id,
+                    {
+                        "plan_status": "paid",
+                        "phase": PHASE_WAIT_RESTART_CONFIRM,
+                    },
+                )
+                push_text(user_id, "決済完了として記録しました。では、改めて今視たいことを教えてください。")
+                return
+
             if phase == PHASE_WAIT_NAME:
                 clean_name = extract_clean_name(text)
                 if not clean_name:
@@ -450,6 +554,8 @@ def process_and_push_reply(
                         "phase": PHASE_WAIT_BIRTH_DATE,
                         "is_profile_confirmed": False,
                         "birth_time_unknown": False,
+                        "plan_status": user_data.get("plan_status", "free"),
+                        "free_sessions_remaining": int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS)),
                     },
                 )
                 send_birthday_picker(
@@ -458,9 +564,6 @@ def process_and_push_reply(
                 )
                 return
 
-            # -------------------------------------------------
-            # phase: 生年月日待ち
-            # -------------------------------------------------
             if phase == PHASE_WAIT_BIRTH_DATE:
                 if selected_date:
                     save_user(
@@ -479,9 +582,6 @@ def process_and_push_reply(
                 )
                 return
 
-            # -------------------------------------------------
-            # phase: 出生時刻待ち
-            # -------------------------------------------------
             if phase == PHASE_WAIT_BIRTH_TIME:
                 birth_date = user_data.get("birth_date")
                 if not birth_date:
@@ -531,9 +631,6 @@ def process_and_push_reply(
                 send_time_picker(user_id)
                 return
 
-            # -------------------------------------------------
-            # phase: プロフィール確認待ち
-            # -------------------------------------------------
             if phase == PHASE_WAIT_PROFILE_CONFIRM:
                 if text == "CONFIRM_YES":
                     yn = "yes"
@@ -581,9 +678,6 @@ def process_and_push_reply(
                 )
                 return
 
-            # -------------------------------------------------
-            # phase: 新規観測開始確認
-            # -------------------------------------------------
             if phase == PHASE_WAIT_RESTART_CONFIRM:
                 if text == "RESTART_YES":
                     yn = "yes"
@@ -593,12 +687,7 @@ def process_and_push_reply(
                     yn = normalize_yes_no(text)
 
                 if yn is None and text:
-                    save_user(
-                        user_id,
-                        {
-                            "temp_restart_text": text,
-                        },
-                    )
+                    save_user(user_id, {"temp_restart_text": text})
                     send_restart_confirm(user_id)
                     return
 
@@ -608,6 +697,11 @@ def process_and_push_reply(
                     return
 
                 if yn == "yes":
+                    if not can_start_paid_reading(user_data):
+                        save_user(user_id, {"phase": PHASE_WAIT_PAYMENT})
+                        push_text(user_id, get_payment_guide_text(user_data))
+                        return
+
                     consult_seed = user_data.get("temp_restart_text", "これからの運勢")
                     consult_seed = normalize_text(consult_seed)
 
@@ -639,9 +733,10 @@ def process_and_push_reply(
                     save_user(user_id, {"last_presented_motifs": sampled})
                     return
 
-            # -------------------------------------------------
-            # phase: 詳細相談待ち
-            # -------------------------------------------------
+            if phase == PHASE_WAIT_PAYMENT:
+                push_text(user_id, get_payment_guide_text(user_data))
+                return
+
             if phase == PHASE_WAIT_CONSULT_DETAIL:
                 category = user_data.get("temp_category", "これからの運勢")
                 detail = text if text else "詳しい事情はまだ言葉にならない"
@@ -660,9 +755,6 @@ def process_and_push_reply(
                 save_user(user_id, {"last_presented_motifs": sampled})
                 return
 
-            # -------------------------------------------------
-            # phase: モチーフ待ち
-            # -------------------------------------------------
             if phase == PHASE_WAIT_MOTIF:
                 if not motif_label:
                     sampled = user_data.get("last_presented_motifs")
@@ -688,7 +780,23 @@ def process_and_push_reply(
                     return
 
                 profile = build_user_profile(user_data)
+                required_keys = ["birth_year", "birth_month", "birth_day"]
+                missing = [k for k in required_keys if k not in profile]
+                if missing:
+                    logger.warning(
+                        "profile missing keys user_id=%s missing=%s profile=%s",
+                        user_id, missing, profile
+                    )
+                    push_text(user_id, "刻印に不足があるようです。リセットして、もう一度最初から刻印を整えてください。")
+                    return
+
                 consult_text = user_data.get("pending_consult", "これからの運勢")
+                logger.info(
+                    "oracle start user_id=%s motif=%s consult=%s profile=%s",
+                    user_id, motif_label, consult_text[:80], profile
+                )
+
+                consume_session_credit_if_needed(user_id, user_data)
 
                 result = oracle_engine.predict(
                     user_profile=profile,
@@ -698,10 +806,20 @@ def process_and_push_reply(
                     chat_history="",
                 )
                 reply_text = result["message"]
+                logger.info("oracle finish user_id=%s topic=%s", user_id, result.get("topic"))
                 log_usage_if_any(result, user_id)
 
                 history = f"識の神託: {reply_text}\n"
                 history = trim_history(history)
+
+                session_id = create_new_session(user_id, user_data, consult_text, motif_label)
+                append_session_message(
+                    user_id,
+                    session_id,
+                    "oracle",
+                    reply_text,
+                    extra={"summary": result.get("summary", {})},
+                )
 
                 save_user(
                     user_id,
@@ -720,12 +838,23 @@ def process_and_push_reply(
                 push_text(user_id, reply_text)
                 return
 
-            # -------------------------------------------------
-            # phase: 対話モード
-            # -------------------------------------------------
             if phase == PHASE_DIALOGUE:
                 profile = build_user_profile(user_data)
+                required_keys = ["birth_year", "birth_month", "birth_day"]
+                missing = [k for k in required_keys if k not in profile]
+                if missing:
+                    logger.warning(
+                        "profile missing keys in dialogue user_id=%s missing=%s profile=%s",
+                        user_id, missing, profile
+                    )
+                    push_text(user_id, "刻印に不足があるようです。リセットして、もう一度最初から刻印を整えてください。")
+                    return
+
                 history = trim_history(user_data.get("chat_history", ""))
+                session_id = user_data.get("current_session_id")
+
+                if session_id:
+                    append_session_message(user_id, session_id, "user", text)
 
                 result = oracle_engine.predict(
                     user_profile=profile,
@@ -735,10 +864,24 @@ def process_and_push_reply(
                     chat_history=history,
                 )
                 reply_text = result["message"]
+                logger.info("dialogue finish user_id=%s topic=%s", user_id, result.get("topic"))
                 log_usage_if_any(result, user_id)
+
+                if session_id:
+                    append_session_message(
+                        user_id,
+                        session_id,
+                        "oracle",
+                        reply_text,
+                        extra={"summary": result.get("summary", {})},
+                    )
 
                 if "[END_SESSION]" in reply_text:
                     reply_text = reply_text.replace("[END_SESSION]", "").strip()
+
+                    if session_id:
+                        close_session(user_id, session_id)
+
                     save_user(
                         user_id,
                         {
@@ -746,6 +889,7 @@ def process_and_push_reply(
                             "phase": PHASE_WAIT_RESTART_CONFIRM,
                             "last_oracle_message": reply_text,
                             "last_oracle_summary": result.get("summary", {}),
+                            "current_session_id": DELETE_FIELD,
                             "chat_history": DELETE_FIELD,
                             "pending_consult": DELETE_FIELD,
                             "temp_category": DELETE_FIELD,
@@ -770,9 +914,6 @@ def process_and_push_reply(
                 push_text(user_id, reply_text)
                 return
 
-            # -------------------------------------------------
-            # 不明phaseの保険
-            # -------------------------------------------------
             logger.warning("unknown phase user_id=%s phase=%s", user_id, phase)
             save_user(user_id, {"phase": PHASE_WAIT_RESTART_CONFIRM})
             push_text(user_id, "少し視界が揺らぎました。もう一度、今視たいことを教えてください。")
@@ -796,7 +937,7 @@ async def health() -> Dict[str, str]:
 
 @app.get("/healthz")
 async def healthz() -> Dict[str, str]:
-    return {"status": "ok", "model": CHAT_MODEL}
+    return {"status": "ok", "model": CHAT_MODEL, "service": SERVICE_NAME}
 
 
 @app.post("/callback")
@@ -824,14 +965,6 @@ async def callback(request: Request):
 def handle_message(event: MessageEvent):
     user_id = event.source.user_id
     text = normalize_text(event.message.text)
-
-    try:
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="……問いは届きました。いま、識が静かに観測しています。")
-        )
-    except Exception:
-        logger.exception("initial quick reply failed")
 
     thread = threading.Thread(
         target=process_and_push_reply,
