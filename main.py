@@ -3,9 +3,8 @@ import json
 import logging
 import threading
 import random
+import re
 import unicodedata
-from datetime import datetime, timezone
-from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -62,6 +61,16 @@ def send_time_picker(user_id: str):
     time_picker = ButtonsTemplate(text="生まれた時刻は分かりますか？", actions=[DatetimePickerAction(label="時刻を選択", data="action=set_birthtime", mode="time", initial="12:00"), PostbackAction(label="分からない", data="action=set_birthtime_unknown")])
     line_bot_api.push_message(user_id, TemplateSendMessage(alt_text="時刻選択", template=time_picker))
 
+# ユーザープロフィールを安全に構築するヘルパー関数
+def build_user_profile(user_data: dict) -> dict:
+    profile = {"name": user_data.get("name", "あなた")}
+    if "birth_date" in user_data:
+        y, m, d = map(int, user_data["birth_date"].split("-"))
+        profile.update({"birth_year": y, "birth_month": m, "birth_day": d})
+    if "birth_hour" in user_data:
+        profile["birth_hour"] = user_data["birth_hour"]
+    return profile
+
 # メイン返信ロジック
 def process_and_push_reply(user_id: str, user_text: str, motif_label: Optional[str] = None, selected_date: Optional[str] = None, selected_time: Optional[str] = None) -> None:
     try:
@@ -72,13 +81,14 @@ def process_and_push_reply(user_id: str, user_text: str, motif_label: Optional[s
         # 1. リセット
         if user_text == "リセット":
             user_ref.delete()
-            line_bot_api.push_message(user_id, TextSendMessage(text="ようこそ、探究者の方。新たな観測を始めましょう。\nまずは、あなた様をどのようにお呼びすればよろしいですか？（本名でもニックネームでも構いません）"))
+            line_bot_api.push_message(user_id, TextSendMessage(text="ようこそ、探究者の方。新たな観測を始めましょう。\nまずは、あなた様のお名前を教えてください。（『〇〇です』などは付けず、お呼びするお名前のみを送信してください）"))
             return
 
-        # 2. 名前登録
+        # 2. 名前登録（「○○です」などの語尾を削除して登録）
         if not user_name:
-            user_ref.set({"name": user_text}, merge=True)
-            send_birthday_picker(user_id, f"……{user_text}様ですね。心に刻みました。次に、あなたの生まれた日を教えてください。")
+            clean_name = re.sub(r"(です|と申します|だよ|と申す|だ|といいます|って呼びます|って呼んで)$", "", user_text).strip()
+            user_ref.set({"name": clean_name}, merge=True)
+            send_birthday_picker(user_id, f"……{clean_name}様ですね。心に刻みました。次に、あなたの生まれた日を教えてください。")
             return
 
         # 3. 生年月日・時刻登録
@@ -106,10 +116,10 @@ def process_and_push_reply(user_id: str, user_text: str, motif_label: Optional[s
                 combined_consult = f"{user_data['temp_category']}（詳細：{user_text}）"
                 user_ref.update({"pending_consult": combined_consult, "temp_category": firestore.DELETE_FIELD})
             elif not user_data.get("pending_consult"):
-                # 新しい相談
-                if len(user_text) <= 5:
+                # 新しい相談（15文字以下の場合は深掘りする）
+                if len(user_text) <= 15:
                     user_ref.update({"temp_category": user_text})
-                    line_bot_api.push_message(user_id, TextSendMessage(text=f"……「{user_text}」についてですね。その奥にある想いを、もう少しだけ詳しく教えていただけますか？（例：具体的な状況や、今感じていることなど）"))
+                    line_bot_api.push_message(user_id, TextSendMessage(text=f"……「{user_text}」についてですね。その奥にある想いを、もう少しだけ詳しく教えていただけますか？\n（具体的な状況や、今感じている不安などを教えていただけると、より深く観測できます）"))
                     return
                 else:
                     user_ref.update({"pending_consult": user_text})
@@ -122,7 +132,7 @@ def process_and_push_reply(user_id: str, user_text: str, motif_label: Optional[s
 
         # 5. 鑑定実行（モチーフ選択直後）
         if motif_label:
-            profile = {"name": user_name, "birth_year": int(user_data["birth_date"].split("-")[0]), "birth_month": int(user_data["birth_date"].split("-")[1]), "birth_day": int(user_data["birth_date"].split("-")[2]), "birth_hour": user_data["birth_hour"]}
+            profile = build_user_profile(user_data)
             consult_text = user_data.get("pending_consult", "これからの運勢")
             
             result = oracle_engine.predict(profile, consult_text, motif_label, is_dialogue=False)
@@ -134,9 +144,11 @@ def process_and_push_reply(user_id: str, user_text: str, motif_label: Optional[s
         # 6. 対話・カウンセリングモード
         if user_data.get("is_dialogue_mode"):
             history = user_data.get("chat_history", "")
-            profile = {"name": user_name, "birth_year": int(user_data["birth_date"].split("-")[0])}
             
-            result = oracle_engine.predict(profile, user_text, user_data.get("last_motif"), is_dialogue=True, chat_history=history)
+            # ここがエラーの原因でした！完全なprofileを渡すように修正しました。
+            profile = build_user_profile(user_data)
+            
+            result = oracle_engine.predict(profile, user_text, user_data.get("last_motif", "静かなる光"), is_dialogue=True, chat_history=history)
             reply_text = result["message"]
 
             # AIが「終了」と判断したかのフラグチェック
