@@ -34,9 +34,6 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from firebase_admin.firestore import DELETE_FIELD
 
-from oracle_engine import OracleEngine
-
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s : %(message)s",
