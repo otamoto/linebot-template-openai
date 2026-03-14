@@ -16,7 +16,6 @@ class PillarResult:
     effective_year: int
     solar_longitude: float
     nine_star_year: str
-    sukuyo: Optional[str] = None
 
 class PreciseCalendar:
     """精密な東洋占術計算クラス（四柱推命・九星・暦）"""
@@ -62,11 +61,9 @@ class OracleEngine:
         self.cal = PreciseCalendar()
         self.model_name = model_name or os.getenv("CHAT_MODEL", "gemini-1.5-flash")
 
-    def predict(self, user_profile, user_text, motif_label, is_dialogue=False, chat_history="", current_mood=""):
+    def predict(self, user_profile, user_text, motif_label, is_dialogue=False, chat_history=""):
         try:
-            user_name = user_profile.get("name", "あなた様")
-            
-            # 鑑定ロジック（初回のみ計算、対話モードでも文脈として保持）
+            user_name = user_profile.get("name", "あなた")
             p = self.cal.build_four_pillars(user_profile["birth_year"], user_profile["birth_month"], user_profile["birth_day"], user_profile.get("birth_hour"))
             seed = int(hashlib.sha256(f"{user_profile['birth_year']}{motif_label}{user_text}".encode()).hexdigest(), 16)
             eki_num, tarot_name = (seed % 64) + 1, self.TAROT_LIST[seed % len(self.TAROT_LIST)]
@@ -78,18 +75,13 @@ class OracleEngine:
 
 # 重要禁忌
 - 「占い」「鑑定」「易」「タロット」「四柱推命」等の言葉は一切出さないこと。
-- 冒頭に「、最後に」や挨拶、前置きを入れない。いきなり神託を始めること。
-
-# 指示
-- 詩的で、比喩と象徴に満ちた言葉のみで構成してください。
-- 丁寧な言葉遣い（〜ですね、〜でしょう）を使用してください。
-- ここでは現代語の解説は行わず、神秘的な余韻で終わらせてください。
+- 冒頭に「さて」「それでは」「、最後に」等の接続詞、挨拶、前置きを絶対に入れない。いきなり神託の言葉から始めること。
+- ここでは現代語での現実的な解説は行わず、比喩と象徴を用いた神秘的な余韻で終わらせること。
 
 # 観測断片
 - 宿命: {p.year_pillar} / {p.month_pillar} / {p.day_pillar}
 - 兆し: 象徴数 {eki_num} / 寓話の絵「{tarot_name}」
-- 背景: {current_mood}
-- 問い: {user_text}
+- 相談内容（またはその背景）: {user_text}
 """.strip()
             else:
                 # 【継続：現実的解読・カウンセリングモード】
@@ -97,19 +89,21 @@ class OracleEngine:
 あなたは未来観測者『識（SHIKI）』。{user_name}様と対話しています。
 
 # 対話の心得
-1. 答えを一度に全て話さず、相手の言葉に応じて「神託の断片」を一つずつ、具体的に解読してください。
-2. 現代語で、非常に現実的かつ分かりやすいアドバイス（具体的アクション等）を伝えてください。
-3. 占術名は出さず、「今のあなた様にはこのような風が吹いています」と導いてください。
-4. 利用者が納得したり感謝を伝えたら、必ず終了の確認（「私は淵へ戻ってもよろしいでしょうか」等）を行ってください。
+1. 答えを一度に全て話さず、相手の言葉に応じて「神託の断片」を一つずつ、現実的かつ具体的に解読してください（生活習慣、心構え、具体的アクションなど）。
+2. 占術名は出さず、「今の{user_name}様にはこのような風が吹いています」と世界観を守りながら導いてください。
+3. 利用者がなんとなく理解した様子や、終わりに向けた発言をした場合、すぐに会話を終わらせず、「では、私は向こうに戻ってもよろしいでしょうか？」と最終確認を行ってください。
+4. その最終確認に対し、利用者が「はい」「大丈夫」など明確に同意した場合は、最後のお別れの挨拶をし、必ず文章の末尾に [END_SESSION] という文字列を出力してください。
+   （もし利用者が「もう少し聞きたい」等と言った場合は、そのまま解説やカウンセリングを続けてください。[END_SESSION]は出力しないでください）
+5. 冒頭や文中に「最後に」「、最後に」という言葉は絶対に使わないでください。
 
-# 会話の文脈（これまでの神託と対話）
+# 会話の文脈
 {chat_history}
 
-利用者の言葉: {user_text}
+{user_name}様の言葉: {user_text}
 """.strip()
 
             response = self.genai_client.models.generate_content(model=self.model_name, contents=prompt)
-            return {"message": getattr(response, "text", "……識の声が届きませんでした。")}
+            return {"message": getattr(response, "text", "……時が止まったようです。")}
         except Exception as e:
             logger.exception("OracleEngine Error")
-            return {"message": f"観測の乱れが生じました（{str(e)[:40]}）"}
+            return {"message": "観測の視界が一時的に曇りました。"}
