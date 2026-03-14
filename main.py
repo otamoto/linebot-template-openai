@@ -62,6 +62,7 @@ PHASE_DIALOGUE = "dialogue"
 
 DEFAULT_UNKNOWN_HOUR = 12
 DEFAULT_UNKNOWN_MINUTE = 0
+DEFAULT_UNKNOWN_SECOND = 0
 DEFAULT_BIRTH_LONGITUDE = float(os.getenv("DEFAULT_BIRTH_LONGITUDE", "135.0"))
 
 MAX_CHAT_HISTORY_CHARS = 5000
@@ -107,7 +108,10 @@ if not firebase_admin._apps:
     firebase_admin.initialize_app(credentials.Certificate(key_dict))
 
 db = firestore.client()
-oracle_engine = OracleEngine(gemini_client=genai_client, model_name=CHAT_MODEL)
+oracle_engine = OracleEngine(
+    gemini_client=genai_client,
+    model_name=CHAT_MODEL,
+)
 
 
 # =========================================================
@@ -153,7 +157,7 @@ def parse_postback_data(data: str) -> Dict[str, str]:
 
 def normalize_yes_no(text: str) -> Optional[str]:
     t = normalize_text(text).lower()
-    yes_set = {"はい", "うん", "ok", "okay", "yes", "y", "確定", "これでいい", "良い", "よい"}
+    yes_set = {"はい", "うん", "ok", "okay", "yes", "y", "確定", "これでいい", "良い", "よい", "大丈夫"}
     no_set = {"いいえ", "修正", "やり直す", "違う", "ちがう", "no", "n"}
     if t in yes_set:
         return "yes"
@@ -206,7 +210,7 @@ def build_user_profile(user_data: Dict[str, Any]) -> Dict[str, Any]:
 
     birth_hour = safe_int(user_data.get("birth_hour"), None)
     birth_minute = safe_int(user_data.get("birth_minute"), DEFAULT_UNKNOWN_MINUTE)
-    birth_second = safe_int(user_data.get("birth_second"), 0)
+    birth_second = safe_int(user_data.get("birth_second"), DEFAULT_UNKNOWN_SECOND)
     birth_longitude = safe_float(user_data.get("birth_longitude"), DEFAULT_BIRTH_LONGITUDE)
 
     if birth_hour is not None:
@@ -378,6 +382,16 @@ def finalize_profile_confirm_text(user_data: Dict[str, Any]) -> str:
     return f"{int(hour):02d}:{int(minute):02d}頃"
 
 
+def log_usage_if_any(result: Dict[str, Any], user_id: str) -> None:
+    try:
+        summary = result.get("summary", {}) or {}
+        usage = summary.get("usage_metadata")
+        if usage:
+            logger.info("usage user_id=%s usage=%s", user_id, usage)
+    except Exception:
+        logger.exception("usage log failed")
+
+
 # =========================================================
 # 本体ロジック
 # =========================================================
@@ -505,7 +519,7 @@ def process_and_push_reply(
                         {
                             "birth_hour": DEFAULT_UNKNOWN_HOUR,
                             "birth_minute": DEFAULT_UNKNOWN_MINUTE,
-                            "birth_second": 0,
+                            "birth_second": DEFAULT_UNKNOWN_SECOND,
                             "birth_longitude": user_data.get("birth_longitude", DEFAULT_BIRTH_LONGITUDE),
                             "birth_time_unknown": True,
                             "phase": PHASE_WAIT_PROFILE_CONFIRM,
@@ -684,6 +698,7 @@ def process_and_push_reply(
                     chat_history="",
                 )
                 reply_text = result["message"]
+                log_usage_if_any(result, user_id)
 
                 history = f"識の神託: {reply_text}\n"
                 history = trim_history(history)
@@ -695,6 +710,7 @@ def process_and_push_reply(
                         "phase": PHASE_DIALOGUE,
                         "chat_history": history,
                         "last_motif": motif_label,
+                        "last_oracle_message": reply_text,
                         "last_oracle_summary": result.get("summary", {}),
                         "pending_consult": DELETE_FIELD,
                         "temp_category": DELETE_FIELD,
@@ -719,6 +735,7 @@ def process_and_push_reply(
                     chat_history=history,
                 )
                 reply_text = result["message"]
+                log_usage_if_any(result, user_id)
 
                 if "[END_SESSION]" in reply_text:
                     reply_text = reply_text.replace("[END_SESSION]", "").strip()
@@ -727,6 +744,7 @@ def process_and_push_reply(
                         {
                             "is_dialogue_mode": False,
                             "phase": PHASE_WAIT_RESTART_CONFIRM,
+                            "last_oracle_message": reply_text,
                             "last_oracle_summary": result.get("summary", {}),
                             "chat_history": DELETE_FIELD,
                             "pending_consult": DELETE_FIELD,
@@ -745,6 +763,7 @@ def process_and_push_reply(
                     user_id,
                     {
                         "chat_history": new_history,
+                        "last_oracle_message": reply_text,
                         "last_oracle_summary": result.get("summary", {}),
                     },
                 )
@@ -805,6 +824,15 @@ async def callback(request: Request):
 def handle_message(event: MessageEvent):
     user_id = event.source.user_id
     text = normalize_text(event.message.text)
+
+    try:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="……問いは届きました。いま、識が静かに観測しています。")
+        )
+    except Exception:
+        logger.exception("initial quick reply failed")
+
     thread = threading.Thread(
         target=process_and_push_reply,
         args=(user_id, text),
