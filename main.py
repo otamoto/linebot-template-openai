@@ -28,7 +28,7 @@ from linebot.models import (
 )
 from linebot.exceptions import InvalidSignatureError
 
-from google import genai
+from openai import OpenAI
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -94,9 +94,9 @@ def require_env(name: str) -> str:
 
 LINE_CHANNEL_ACCESS_TOKEN = require_env("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = require_env("LINE_CHANNEL_SECRET")
-GEMINI_API_KEY = require_env("GEMINI_API_KEY")
+OPENAI_API_KEY = require_env("OPENAI_API_KEY")
 FIREBASE_SERVICE_ACCOUNT_JSON = require_env("FIREBASE_SERVICE_ACCOUNT_JSON")
-CHAT_MODEL = os.getenv("CHAT_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
 
 # =========================================================
@@ -104,7 +104,7 @@ CHAT_MODEL = os.getenv("CHAT_MODEL", os.getenv("GEMINI_MODEL", "gemini-2.5-flash
 # =========================================================
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 if not firebase_admin._apps:
     try:
@@ -115,8 +115,8 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 oracle_engine = OracleEngine(
-    gemini_client=genai_client,
-    model_name=CHAT_MODEL,
+    openai_client=openai_client,
+    model_name=OPENAI_MODEL,
 )
 
 
@@ -491,9 +491,6 @@ def append_session_message(
     get_session_ref(user_id, session_id).set({"updated_at": now_iso()}, merge=True)
 
 
-# =========================================================
-# 本体ロジック
-# =========================================================
 def process_and_push_reply(
     user_id: str,
     user_text: str,
@@ -927,9 +924,6 @@ def process_and_push_reply(
                 logger.exception("Failed to push fallback message for user_id=%s", user_id)
 
 
-# =========================================================
-# FastAPI / LINE callback
-# =========================================================
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -937,7 +931,7 @@ async def health() -> Dict[str, str]:
 
 @app.get("/healthz")
 async def healthz() -> Dict[str, str]:
-    return {"status": "ok", "model": CHAT_MODEL, "service": SERVICE_NAME}
+    return {"status": "ok", "model": OPENAI_MODEL, "service": SERVICE_NAME}
 
 
 @app.post("/callback")
