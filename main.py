@@ -382,7 +382,7 @@ def get_premium_guide_text(user_data: Dict[str, Any]) -> str:
 def send_initial_greeting(user_id: str) -> None:
     push_text(
         user_id,
-        "【私は”識”。天伝詔より賜った詠歌を、あなたに伝える存在です。今回はどの様な想いをお持ちになりましたか？】"
+        "私は”識”。天伝詔より賜った詠歌を、あなたに伝える存在です。今回はどの様な想いをお持ちになりましたか？"
     )
 
 
