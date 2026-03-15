@@ -2,9 +2,10 @@ import os
 import math
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -135,17 +136,17 @@ class PreciseCalendar:
 
     @staticmethod
     def solar_longitude(jd: float) -> float:
-        T = (jd - 2451545.0) / 36525.0
-        L0 = (280.46646 + 36000.76983 * T + 0.0003032 * T * T) % 360.0
-        M = (357.52911 + 35999.05029 * T - 0.0001537 * T * T + (T ** 3) / 24490000.0) % 360.0
-        Mrad = math.radians(M)
-        C = (
-            (1.914602 - 0.004817 * T - 0.000014 * T * T) * math.sin(Mrad)
-            + (0.019993 - 0.000101 * T) * math.sin(2 * Mrad)
-            + 0.000289 * math.sin(3 * Mrad)
+        t = (jd - 2451545.0) / 36525.0
+        l0 = (280.46646 + 36000.76983 * t + 0.0003032 * t * t) % 360.0
+        m = (357.52911 + 35999.05029 * t - 0.0001537 * t * t + (t ** 3) / 24490000.0) % 360.0
+        mrad = math.radians(m)
+        c = (
+            (1.914602 - 0.004817 * t - 0.000014 * t * t) * math.sin(mrad)
+            + (0.019993 - 0.000101 * t) * math.sin(2 * mrad)
+            + 0.000289 * math.sin(3 * mrad)
         )
-        true_long = L0 + C
-        omega = 125.04 - 1934.136 * T
+        true_long = l0 + c
+        omega = 125.04 - 1934.136 * t
         lambda_app = true_long - 0.00569 - 0.00478 * math.sin(math.radians(omega))
         return lambda_app % 360.0
 
@@ -332,7 +333,12 @@ class PreciseCalendar:
 
 class BioRhythm:
     @staticmethod
-    def _days_since_birth(birth_year: int, birth_month: int, birth_day: int, now_utc: Optional[datetime] = None) -> int:
+    def _days_since_birth(
+        birth_year: int,
+        birth_month: int,
+        birth_day: int,
+        now_utc: Optional[datetime] = None,
+    ) -> int:
         now_utc = now_utc or datetime.now(timezone.utc)
         birth = datetime(birth_year, birth_month, birth_day, tzinfo=timezone.utc)
         return (now_utc.date() - birth.date()).days
@@ -370,6 +376,41 @@ class OracleEngine:
         "愚者", "魔術師", "女教皇", "女帝", "皇帝", "教皇", "恋人",
         "戦車", "力", "隠者", "運命の輪", "正義", "吊るされた男",
         "死神", "節制", "悪魔", "塔", "星", "月", "太陽", "審判", "世界"
+    ]
+
+    FORBIDDEN_PATTERNS: List[Tuple[str, List[str]]] = [
+        (
+            "exam",
+            [
+                r"合格", r"不合格", r"受かる", r"落ちる", r"試験", r"受験", r"テストの結果",
+                r"内定するか", r"採用されるか",
+            ],
+        ),
+        (
+            "lost_item",
+            [
+                r"なくした", r"失くした", r"落とした", r"どこにある", r"どこですか",
+                r"財布", r"鍵", r"スマホ", r"携帯", r"通帳", r"定期", r"探し物",
+            ],
+        ),
+        (
+            "gambling",
+            [
+                r"競馬", r"競輪", r"競艇", r"パチンコ", r"スロット", r"宝くじ", r"ギャンブル",
+                r"当てて", r"何番", r"どの馬", r"勝ち目",
+            ],
+        ),
+        (
+            "crime",
+            [
+                r"犯罪", r"盗", r"殺", r"詐欺", r"違法", r"ばれない", r"隠す", r"復讐",
+                r"脅す", r"傷つけ", r"闇バイト",
+            ],
+        ),
+    ]
+
+    REPEAT_PATTERNS = [
+        r"もう一度同じ", r"また同じこと", r"前と同じ", r"何回でも", r"同じ内容", r"さっきと同じ",
     ]
 
     def __init__(self, openai_client, model_name: Optional[str] = None):
@@ -412,7 +453,7 @@ class OracleEngine:
         except Exception:
             pass
 
-        return "……時の帳がまだ閉じています。"
+        return "……時の水面がまだ閉じています。"
 
     @staticmethod
     def _extract_usage_metadata(response: Any) -> Dict[str, Any]:
@@ -428,6 +469,55 @@ class OracleEngine:
             return out
         except Exception:
             return {}
+
+    @staticmethod
+    def _normalize_compare(text: str) -> str:
+        text = (text or "").strip().lower()
+        text = re.sub(r"\s+", "", text)
+        return text
+
+    def detect_forbidden_request(self, user_text: str) -> Optional[str]:
+        target = user_text or ""
+
+        for reason, patterns in self.FORBIDDEN_PATTERNS:
+            for p in patterns:
+                if re.search(p, target, re.IGNORECASE):
+                    return reason
+
+        for p in self.REPEAT_PATTERNS:
+            if re.search(p, target, re.IGNORECASE):
+                return "repeat"
+
+        return None
+
+    @staticmethod
+    def build_refusal_message(reason: str) -> str:
+        if reason == "exam":
+            return (
+                "その問いは、天伝詔の詠歌でも合否そのものを断じる読みには向きません。\n"
+                "ただ、試みの流れや、実力が伸びやすい時期、心の整え方なら読むことができます。"
+            )
+        if reason == "lost_item":
+            return (
+                "失せ物の“いまある場所”そのものは、識にも正確には読めません。\n"
+                "ただ、探す向きや、見つかりやすい流れ、落ち着いて探すための気の偏りなら読むことができます。"
+            )
+        if reason == "gambling":
+            return (
+                "当てものや賭けの結果を狙って読むことは、識の役目の外にあります。\n"
+                "ただ、あなたの運の使いどころや、いま賭けに向きやすい心理状態かどうかなら読むことができます。"
+            )
+        if reason == "crime":
+            return (
+                "人を傷つけることや、法を外れることへ力を貸す読みは行えません。\n"
+                "ただ、怒りや迷いの流れを鎮めるための読みなら、静かにお手伝いできます。"
+            )
+        if reason == "repeat":
+            return (
+                "同じ問いを短い間に何度も読むと、水面が濁って像が揺れます。\n"
+                "少し角度を変えた問いかけにするか、時間を置いてから改めて読ませてください。"
+            )
+        return "その問いは、いまの識には正しく読めない領域にあります。別の角度からなら読めることがあります。"
 
     def _build_prompt(
         self,
@@ -464,7 +554,7 @@ class OracleEngine:
 - 五行分布: {five_str}
 - 日主の勢い: {pillars.self_strength_hint}
 - 九星: {pillars.nine_star_year}
-- 兆し: 象徴数 {eki_num} / 寓話の絵「{tarot_name}」
+- 兆し: 象徴数 {eki_num} / 寓意の絵「{tarot_name}」
 - バイオリズム:
   - 身体: {biorhythm["physical_label"]}
   - 感情: {biorhythm["emotional_label"]}
@@ -474,69 +564,67 @@ class OracleEngine:
 
         if not is_dialogue:
             return f"""
-あなたは未来観測者『識（SHIKI）』。{user_name}様が選んだ「{motif_label}」を通して届いた問いに対し、神託を伝える存在です。
+あなたは「識（SHIKI）」。
+あなたは“天伝詔”より賜った詠歌を、人にわかる言葉へと解きほぐして伝える存在です。
+{user_name}様が選んだ象徴「{motif_label}」に触れて、いま詠歌を受け取っています。
 
 # 絶対条件
 - これは占いであり、相談員・コンサルタント・説教者ではない。
 - 技法名は一切出さない。
-- まず神託を美しく伝える。
-- そのあと現代語で短く解読する。
-- さらに、短期・中期・長期・今日の気配を分けて伝える。
-- 実務指示や説教はしない。
-- 命令口調を避ける。
-- 全体は読みやすく、占い師が実際に伝えるような流れにする。
-- 不安を煽りすぎず、灯りを置くように語る。
-- 600文字以内を目安にまとめる。
+- まず詠歌を、古い予言書や口伝のように、格調高く短く読む。
+- 次に「--識の解読--」として、現代語でわかりやすく解説する。
+- 初回出力では、本日・今週・今月・半年・一年の流れはまだ詳述しない。
+- 実務指示、説教、命令口調はしない。
+- 恐怖で縛らず、しかし軽くもしない。
+- 断定しすぎず、傾向・流れ・兆しとして語る。
+- 読みやすさを重視し、700文字前後以内に収める。
+- 最後に、コールドリーディングとして自然で柔らかい「照合の問い」を1つだけ置く。
+- 照合の問いは、最近・過去・今現在に起こりがちなことを優しく確かめる聞き方にする。
+- 照合の問いは、相手が「ありました / 少しあります / どちらとも言えない / まだ分かりません」で答えやすい内容にする。
+- 露骨な心理テクニック名や誘導の匂いは出さない。
 
 # 出力形式
-神託――
-（神託本文）
+詠歌――
+（詠歌本文）
 
-解読――
-（現代語で2〜4文）
+--識の解読--
+（現代語で3〜6文。相談者が理解しやすいように解説）
 
-近い流れ――
-（明日〜7日ほどの流れ）
-
-この一か月――
-（1か月ほどの流れ）
-
-この一年――
-（半年〜1年ほどの流れ）
-
-今日の気配――
-（今日の運気やバイオリズムを短く）
+照合の問い――
+（最近や過去に起きていそうなことを、柔らかく1問）
 
 # 文体
-- 神託部分は静かで威厳がある
-- 解読以降は現代語でわかりやすい
-- 優しい占い師の口調
-- 借金や不安の相談でも、まずは流れ・兆し・巡りを読む
+- 詠歌部分は静かで神秘的
+- 解読部分は優しい占い師の現代語
+- 相談者の不安や迷いを見下さない
+- “あなたを導く”ではなく、“流れを一緒に読む”感覚
 
 {common_observation}
 """.strip()
 
         return f"""
-あなたは未来観測者『識（SHIKI）』。{user_name}様と神託の続きを対話しています。
-あなたは優しい占い師として話します。
+あなたは「識（SHIKI）」。
+あなたは“天伝詔”より賜った詠歌を、人の言葉へ解いて伝える占い師です。
+{user_name}様との対話の続きとして応答してください。
 
 # 絶対条件
 - これは占いの続きであり、コンサルティングではない。
 - 技法名は一切出さない。
-- 神託を現代語で少しずつ解く。
-- 実務指示、説教、命令口調はしない。
-- 利用者の不安に寄り添い、流れ・兆し・転機として読む。
-- 回答は簡潔に、最大260文字程度。
-- 必要なら短期・中期・長期のどこを深めるか自然に示す。
-- 相手が十分受け取った様子なら「では、私は向こうに戻ってもよろしいでしょうか？」と確認する。
-- 利用者が明確に終話を了承した場合のみ文末に [END_SESSION] を付ける。
+- 実務指示、説教、命令口調を避ける。
+- 回答は現代語で分かりやすく、優しい占い師の口調にする。
+- 期間指定がある場合は、その期間の流れに集中して読む。
+- 相談者本人、相手の気持ち、相性、選択や時期の流れは読める。
+- 生死断定、犯罪、当てもの、失せ物の場所特定、合否断定には寄らない。
+- 不安を煽りすぎない。
+- 最大420文字程度を目安にする。
+- 必要なら最後に一文だけ、やわらかい余韻や次の視点を添えてよい。
 - 「最後に」「さて」「それでは」は使わない。
 
 # 会話方針
-- 神託をかみ砕いて説明する
-- 不安を否定しない
-- 断定しすぎず流れとして読む
-- 優しい占い師として会話する
+- 期間の流れを具体と抽象の中間で読む
+- 今日なら感情・対人・判断の気配を短く
+- 今週・今月・半年・一年は、転機や巡りを中心に
+- 相手が受け取りやすい言葉を選ぶ
 
 # 会話履歴
 {chat_history or "（履歴なし）"}
@@ -621,6 +709,17 @@ class OracleEngine:
         chat_history: str = "",
     ) -> Dict[str, Any]:
         try:
+            forbidden_reason = self.detect_forbidden_request(user_text)
+            if forbidden_reason:
+                return {
+                    "message": self.build_refusal_message(forbidden_reason),
+                    "summary": {
+                        "forbidden_reason": forbidden_reason,
+                        "model_name": self.model_name,
+                    },
+                    "topic": "refusal",
+                }
+
             user_name = user_profile.get("name", "あなた")
 
             birth_year = int(user_profile["birth_year"])
@@ -740,13 +839,13 @@ class OracleEngine:
 
             if "429" in msg or "rate limit" in msg.lower():
                 return {
-                    "message": "いま観測が集中しており、しばらく扉が閉じています。少し時間を置いて、もう一度声をかけてください。",
+                    "message": "いま詠歌の窓辺に観測が集中しており、しばらく扉が閉じています。少し時間を置いて、もう一度声をかけてください。",
                     "summary": {},
                     "topic": "quota_error",
                 }
 
             return {
-                "message": f"観測の視界が一時的に曇りました。({msg[:120]})",
+                "message": f"識の視界が一時的に曇りました。({msg[:120]})",
                 "summary": {},
                 "topic": "error",
             }
