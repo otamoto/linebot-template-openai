@@ -3,6 +3,7 @@ import math
 import hashlib
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 
 logger = logging.getLogger(__name__)
@@ -247,11 +248,7 @@ class PreciseCalendar:
         start_idx = cls.JUNISHI.index(start_branch)
         target_idx = cls.JUNISHI.index(branch)
         is_yang = cls.STEM_YINYANG[day_stem] == "陽"
-
-        if is_yang:
-            diff = (target_idx - start_idx) % 12
-        else:
-            diff = (start_idx - target_idx) % 12
+        diff = (target_idx - start_idx) % 12 if is_yang else (start_idx - target_idx) % 12
         return cls.TWELVE_STAGES_FORWARD[diff]
 
     @classmethod
@@ -332,75 +329,40 @@ class PreciseCalendar:
             return "やや身弱〜身弱寄り"
         return "中和寄り"
 
+
+class BioRhythm:
+    @staticmethod
+    def _days_since_birth(birth_year: int, birth_month: int, birth_day: int, now_utc: Optional[datetime] = None) -> int:
+        now_utc = now_utc or datetime.now(timezone.utc)
+        birth = datetime(birth_year, birth_month, birth_day, tzinfo=timezone.utc)
+        return (now_utc.date() - birth.date()).days
+
     @classmethod
-    def build_four_pillars(
-        cls,
-        birth_year: int,
-        birth_month: int,
-        birth_day: int,
-        birth_hour: Optional[int] = None,
-        birth_minute: int = 0,
-        birth_second: int = 0,
-        birth_longitude: float = 135.0,
-    ) -> PillarResult:
-        jd = cls.julian_day(
-            birth_year,
-            birth_month,
-            birth_day,
-            birth_hour if birth_hour is not None else 12,
-            birth_minute,
-            birth_second,
-            birth_longitude,
-        )
+    def build(cls, birth_year: int, birth_month: int, birth_day: int) -> Dict[str, Any]:
+        days = cls._days_since_birth(birth_year, birth_month, birth_day)
+        physical = math.sin(2 * math.pi * days / 23.0)
+        emotional = math.sin(2 * math.pi * days / 28.0)
+        intellectual = math.sin(2 * math.pi * days / 33.0)
 
-        sl = cls.solar_longitude(jd)
-        ey = cls.effective_year_by_setsu(birth_year, sl)
-        yp = cls.year_pillar(ey)
-        mp = cls.month_pillar(yp[0], sl)
-        dp = cls.day_pillar(jd)
-        hp = cls.hour_pillar(dp[0], birth_hour)
+        def label(v: float) -> str:
+            if v >= 0.55:
+                return "高い"
+            if v >= 0.15:
+                return "やや高い"
+            if v > -0.15:
+                return "揺らぎやすい"
+            if v > -0.55:
+                return "やや低い"
+            return "低い"
 
-        yh = cls.get_hidden_stems(yp)
-        mh = cls.get_hidden_stems(mp)
-        dh = cls.get_hidden_stems(dp)
-        hh = cls.get_hidden_stems(hp)
-
-        yt = cls.get_twelve_stage(dp[0], yp[1])
-        mt = cls.get_twelve_stage(dp[0], mp[1])
-        dt = cls.get_twelve_stage(dp[0], dp[1])
-        ht = cls.get_twelve_stage(dp[0], hp[1]) if hp else None
-
-        yts = cls.get_tsuhen(dp[0], yp[0])
-        mts = cls.get_tsuhen(dp[0], mp[0])
-        dts = cls.get_tsuhen(dp[0], dp[0])
-        hts = cls.get_tsuhen(dp[0], hp[0]) if hp else None
-
-        five_scores = cls.compute_five_element_scores(yp, mp, dp, hp)
-        self_strength_hint = cls.evaluate_self_strength_hint(dp[0], mp, five_scores)
-
-        return PillarResult(
-            year_pillar=yp,
-            month_pillar=mp,
-            day_pillar=dp,
-            hour_pillar=hp,
-            year_hidden_stems=yh,
-            month_hidden_stems=mh,
-            day_hidden_stems=dh,
-            hour_hidden_stems=hh,
-            year_twelve_stage=yt,
-            month_twelve_stage=mt,
-            day_twelve_stage=dt,
-            hour_twelve_stage=ht,
-            year_tsuhen=yts,
-            month_tsuhen=mts,
-            day_tsuhen=dts,
-            hour_tsuhen=hts,
-            effective_year=ey,
-            solar_longitude=sl,
-            nine_star_year=cls.nine_star_year(ey),
-            five_element_scores=five_scores,
-            self_strength_hint=self_strength_hint,
-        )
+        return {
+            "physical": round(physical, 3),
+            "emotional": round(emotional, 3),
+            "intellectual": round(intellectual, 3),
+            "physical_label": label(physical),
+            "emotional_label": label(emotional),
+            "intellectual_label": label(intellectual),
+        }
 
 
 class OracleEngine:
@@ -458,7 +420,6 @@ class OracleEngine:
             usage = getattr(response, "usage", None)
             if usage is None:
                 return {}
-
             out: Dict[str, Any] = {}
             for key in ["input_tokens", "output_tokens", "total_tokens"]:
                 val = getattr(usage, key, None)
@@ -476,6 +437,7 @@ class OracleEngine:
         pillars: PillarResult,
         eki_num: int,
         tarot_name: str,
+        biorhythm: Dict[str, Any],
         is_dialogue: bool,
         chat_history: str,
     ) -> str:
@@ -503,6 +465,10 @@ class OracleEngine:
 - 日主の勢い: {pillars.self_strength_hint}
 - 九星: {pillars.nine_star_year}
 - 兆し: 象徴数 {eki_num} / 寓話の絵「{tarot_name}」
+- バイオリズム:
+  - 身体: {biorhythm["physical_label"]}
+  - 感情: {biorhythm["emotional_label"]}
+  - 思考: {biorhythm["intellectual_label"]}
 - 問い: {user_text}
 """.strip()
 
@@ -512,55 +478,64 @@ class OracleEngine:
 
 # 絶対条件
 - これは占いであり、相談員・コンサルタント・説教者ではない。
-- 「占い」「鑑定」「四柱推命」「タロット」「五行」など技法名は一切出さない。
-- まず最初に、神託を2〜4段落で美しく伝えること。
-- そのあとに必ず、現代語で短くわかりやすい「解読」を付けること。
-- 解読は現代語でやさしく、利用者が理解しやすい言い回しにすること。
-- ただし、実務指示・説教・命令口調・コンサル的提案にはしない。
-- 「〜すべき」「〜したほうがいい」を多用しない。
-- 法律、債務整理、契約、医療などの専門実務に踏み込みすぎない。
-- 解読は2〜4文程度で簡潔にすること。
-- 最後に「さらに知りたければ、続きを解くこともできます」のような余白を残して終えること。
-- 全体で最大520文字程度。
+- 技法名は一切出さない。
+- まず神託を美しく伝える。
+- そのあと現代語で短く解読する。
+- さらに、短期・中期・長期・今日の気配を分けて伝える。
+- 実務指示や説教はしない。
+- 命令口調を避ける。
+- 全体は読みやすく、占い師が実際に伝えるような流れにする。
+- 不安を煽りすぎず、灯りを置くように語る。
+- 600文字以内を目安にまとめる。
 
 # 出力形式
 神託――
 （神託本文）
 
 解読――
-（現代語で短い解説）
+（現代語で2〜4文）
+
+近い流れ――
+（明日〜7日ほどの流れ）
+
+この一か月――
+（1か月ほどの流れ）
+
+この一年――
+（半年〜1年ほどの流れ）
+
+今日の気配――
+（今日の運気やバイオリズムを短く）
 
 # 文体
-- 神託部分は静かで威厳があり、古い神託のように語る。
-- 解読部分は現代語で、やさしく、わかりやすくする。
-- 借金や不安の相談でも、まずは流れ・兆し・転機を読む。
+- 神託部分は静かで威厳がある
+- 解読以降は現代語でわかりやすい
+- 優しい占い師の口調
+- 借金や不安の相談でも、まずは流れ・兆し・巡りを読む
 
 {common_observation}
 """.strip()
 
         return f"""
-あなたは未来観測者『識（SHIKI）』。{user_name}様と、すでに神託を交わした後の対話を続けています。
-あなたは「優しい占い師」として話します。
+あなたは未来観測者『識（SHIKI）』。{user_name}様と神託の続きを対話しています。
+あなたは優しい占い師として話します。
 
 # 絶対条件
 - これは占いの続きであり、コンサルティングではない。
 - 技法名は一切出さない。
-- 神託の続きを、現代語で少しずつ解き明かす。
-- 利用者が理解しやすい、自然でやさしい現代語で話す。
-- ただし占いの空気は壊さず、「流れ」「兆し」「転機」「巡り」を読む姿勢を保つ。
+- 神託を現代語で少しずつ解く。
 - 実務指示、説教、命令口調はしない。
-- 「返済計画を作る」「交渉書類を作る」など、占いから外れる具体策は避ける。
-- 利用者の気持ちに寄り添い、やわらかく言葉を返す。
+- 利用者の不安に寄り添い、流れ・兆し・転機として読む。
 - 回答は簡潔に、最大260文字程度。
-- 一度に全部を話さず、質問に応じて少しずつ解く。
+- 必要なら短期・中期・長期のどこを深めるか自然に示す。
 - 相手が十分受け取った様子なら「では、私は向こうに戻ってもよろしいでしょうか？」と確認する。
-- 利用者が明確に終話を了承した場合のみ、文末に [END_SESSION] を付ける。
+- 利用者が明確に終話を了承した場合のみ文末に [END_SESSION] を付ける。
 - 「最後に」「さて」「それでは」は使わない。
 
 # 会話方針
 - 神託をかみ砕いて説明する
-- 利用者の不安を否定しない
-- 断定よりも、流れとして読む
+- 不安を否定しない
+- 断定しすぎず流れとして読む
 - 優しい占い師として会話する
 
 # 会話履歴
@@ -568,6 +543,74 @@ class OracleEngine:
 
 {common_observation}
 """.strip()
+
+    def build_four_pillars(
+        self,
+        birth_year: int,
+        birth_month: int,
+        birth_day: int,
+        birth_hour: Optional[int] = None,
+        birth_minute: int = 0,
+        birth_second: int = 0,
+        birth_longitude: float = 135.0,
+    ) -> PillarResult:
+        jd = self.cal.julian_day(
+            birth_year,
+            birth_month,
+            birth_day,
+            birth_hour if birth_hour is not None else 12,
+            birth_minute,
+            birth_second,
+            birth_longitude,
+        )
+        sl = self.cal.solar_longitude(jd)
+        ey = self.cal.effective_year_by_setsu(birth_year, sl)
+        yp = self.cal.year_pillar(ey)
+        mp = self.cal.month_pillar(yp[0], sl)
+        dp = self.cal.day_pillar(jd)
+        hp = self.cal.hour_pillar(dp[0], birth_hour)
+
+        yh = self.cal.get_hidden_stems(yp)
+        mh = self.cal.get_hidden_stems(mp)
+        dh = self.cal.get_hidden_stems(dp)
+        hh = self.cal.get_hidden_stems(hp)
+
+        yt = self.cal.get_twelve_stage(dp[0], yp[1])
+        mt = self.cal.get_twelve_stage(dp[0], mp[1])
+        dt = self.cal.get_twelve_stage(dp[0], dp[1])
+        ht = self.cal.get_twelve_stage(dp[0], hp[1]) if hp else None
+
+        yts = self.cal.get_tsuhen(dp[0], yp[0])
+        mts = self.cal.get_tsuhen(dp[0], mp[0])
+        dts = self.cal.get_tsuhen(dp[0], dp[0])
+        hts = self.cal.get_tsuhen(dp[0], hp[0]) if hp else None
+
+        five_scores = self.cal.compute_five_element_scores(yp, mp, dp, hp)
+        self_strength_hint = self.cal.evaluate_self_strength_hint(dp[0], mp, five_scores)
+
+        return PillarResult(
+            year_pillar=yp,
+            month_pillar=mp,
+            day_pillar=dp,
+            hour_pillar=hp,
+            year_hidden_stems=yh,
+            month_hidden_stems=mh,
+            day_hidden_stems=dh,
+            hour_hidden_stems=hh,
+            year_twelve_stage=yt,
+            month_twelve_stage=mt,
+            day_twelve_stage=dt,
+            hour_twelve_stage=ht,
+            year_tsuhen=yts,
+            month_tsuhen=mts,
+            day_tsuhen=dts,
+            hour_tsuhen=hts,
+            effective_year=ey,
+            solar_longitude=sl,
+            nine_star_year=self.cal.nine_star_year(ey),
+            five_element_scores=five_scores,
+            self_strength_hint=self_strength_hint,
+        )
 
     def predict(
         self,
@@ -591,7 +634,7 @@ class OracleEngine:
             if birth_hour is not None:
                 birth_hour = int(birth_hour)
 
-            pillars = self.cal.build_four_pillars(
+            pillars = self.build_four_pillars(
                 birth_year=birth_year,
                 birth_month=birth_month,
                 birth_day=birth_day,
@@ -599,6 +642,12 @@ class OracleEngine:
                 birth_minute=birth_minute,
                 birth_second=birth_second,
                 birth_longitude=birth_longitude,
+            )
+
+            biorhythm = BioRhythm.build(
+                birth_year=birth_year,
+                birth_month=birth_month,
+                birth_day=birth_day,
             )
 
             seed = self._stable_seed(
@@ -621,6 +670,7 @@ class OracleEngine:
                 pillars=pillars,
                 eki_num=eki_num,
                 tarot_name=tarot_name,
+                biorhythm=biorhythm,
                 is_dialogue=is_dialogue,
                 chat_history=chat_history,
             )
@@ -677,6 +727,7 @@ class OracleEngine:
                     "solar_longitude": round(pillars.solar_longitude, 6),
                     "eki_num": eki_num,
                     "tarot_name": tarot_name,
+                    "biorhythm": biorhythm,
                     "model_name": self.model_name,
                     "usage_metadata": usage_metadata,
                 },
