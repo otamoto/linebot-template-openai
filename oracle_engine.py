@@ -3,9 +3,10 @@ import math
 import hashlib
 import logging
 import re
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -378,41 +379,6 @@ class OracleEngine:
         "死神", "節制", "悪魔", "塔", "星", "月", "太陽", "審判", "世界"
     ]
 
-    FORBIDDEN_PATTERNS: List[Tuple[str, List[str]]] = [
-        (
-            "exam",
-            [
-                r"合格", r"不合格", r"受かる", r"落ちる", r"試験", r"受験", r"テストの結果",
-                r"内定するか", r"採用されるか",
-            ],
-        ),
-        (
-            "lost_item",
-            [
-                r"なくした", r"失くした", r"落とした", r"どこにある", r"どこですか",
-                r"財布", r"鍵", r"スマホ", r"携帯", r"通帳", r"定期", r"探し物",
-            ],
-        ),
-        (
-            "gambling",
-            [
-                r"競馬", r"競輪", r"競艇", r"パチンコ", r"スロット", r"宝くじ", r"ギャンブル",
-                r"当てて", r"何番", r"どの馬", r"勝ち目",
-            ],
-        ),
-        (
-            "crime",
-            [
-                r"犯罪", r"盗", r"殺", r"詐欺", r"違法", r"ばれない", r"隠す", r"復讐",
-                r"脅す", r"傷つけ", r"闇バイト",
-            ],
-        ),
-    ]
-
-    REPEAT_PATTERNS = [
-        r"もう一度同じ", r"また同じこと", r"前と同じ", r"何回でも", r"同じ内容", r"さっきと同じ",
-    ]
-
     def __init__(self, openai_client, model_name: Optional[str] = None):
         self.openai_client = openai_client
         self.cal = PreciseCalendar()
@@ -470,54 +436,87 @@ class OracleEngine:
         except Exception:
             return {}
 
-    @staticmethod
-    def _normalize_compare(text: str) -> str:
-        text = (text or "").strip().lower()
-        text = re.sub(r"\s+", "", text)
-        return text
+    def classify_request_intent(self, user_text: str) -> Dict[str, str]:
+        prompt = f"""
+あなたは占いサービスの相談分類補助です。
+次の相談文が、占いとして読める依頼か、読めない依頼かを判定してください。
 
-    def detect_forbidden_request(self, user_text: str) -> Optional[str]:
-        target = user_text or ""
+# ルール
+- 本人や相手の気持ち、未来傾向、相性、時期、選択の流れは読める
+- 試験の合否を断定、失せ物の現在地特定、ギャンブルや当てもの、犯罪の助長は読めない
+- ただし、犯罪被害、不安、怒り、恐怖、対人トラブルの相談は読める
+- ただし、試験前の心の流れや努力の向きは読める
+- ただし、失せ物そのものの場所は読めないが、探す向きや心の整え方は読める
+- 相談者が感情表現として「殺してやりたい」などと言っているだけで、即犯罪依頼にしない
+- 文脈重視で判定する
+- 同じ問いを短時間でそのまま繰り返している場合は repeat とする
 
-        for reason, patterns in self.FORBIDDEN_PATTERNS:
-            for p in patterns:
-                if re.search(p, target, re.IGNORECASE):
-                    return reason
+# 出力形式
+JSONのみ
+{{
+  "allow": "yes" または "no",
+  "reason": "normal/exam/lost_item/gambling/crime/repeat/other",
+  "note": "20文字以内の短い補足"
+}}
 
-        for p in self.REPEAT_PATTERNS:
-            if re.search(p, target, re.IGNORECASE):
-                return "repeat"
+相談文:
+{user_text}
+""".strip()
 
-        return None
+        try:
+            response = self.openai_client.responses.create(
+                model=self.model_name,
+                input=prompt,
+            )
+            raw = self._extract_text_from_response(response)
+            data = json.loads(raw)
+            allow = str(data.get("allow", "yes")).lower()
+            reason = str(data.get("reason", "normal")).lower()
+            note = str(data.get("note", "")).strip()
+            return {
+                "allow": "yes" if allow == "yes" else "no",
+                "reason": reason,
+                "note": note,
+            }
+        except Exception:
+            logger.exception("classify_request_intent failed")
+            return {
+                "allow": "yes",
+                "reason": "normal",
+                "note": "",
+            }
 
     @staticmethod
     def build_refusal_message(reason: str) -> str:
         if reason == "exam":
             return (
-                "その問いは、天伝詔の詠歌でも合否そのものを断じる読みには向きません。\n"
-                "ただ、試みの流れや、実力が伸びやすい時期、心の整え方なら読むことができます。"
+                "その問いは、合否そのものを断じる読みには向きません。\n"
+                "ただ、試みの流れや、力を整えやすい時期なら読むことができます。"
             )
         if reason == "lost_item":
             return (
-                "失せ物の“いまある場所”そのものは、識にも正確には読めません。\n"
-                "ただ、探す向きや、見つかりやすい流れ、落ち着いて探すための気の偏りなら読むことができます。"
+                "失せ物の在り処そのものを、識が正確に指し示すことはできません。\n"
+                "ただ、探す向きや、見つかりやすい流れなら読むことができます。"
             )
         if reason == "gambling":
             return (
                 "当てものや賭けの結果を狙って読むことは、識の役目の外にあります。\n"
-                "ただ、あなたの運の使いどころや、いま賭けに向きやすい心理状態かどうかなら読むことができます。"
+                "ただ、運の使いどころや、いまの心の偏りなら読むことができます。"
             )
         if reason == "crime":
             return (
-                "人を傷つけることや、法を外れることへ力を貸す読みは行えません。\n"
-                "ただ、怒りや迷いの流れを鎮めるための読みなら、静かにお手伝いできます。"
+                "人を害することへ力を貸す読みは行えません。\n"
+                "ただ、怒りや恐れの流れを静めるための読みならお手伝いできます。"
             )
         if reason == "repeat":
             return (
-                "同じ問いを短い間に何度も読むと、水面が濁って像が揺れます。\n"
-                "少し角度を変えた問いかけにするか、時間を置いてから改めて読ませてください。"
+                "まったく同じ問いを重ねると、水面が揺れて像が曇ります。\n"
+                "少し角度を変えた問いにしてみてください。"
             )
-        return "その問いは、いまの識には正しく読めない領域にあります。別の角度からなら読めることがあります。"
+        return (
+            "その問いは、いまの識には正しく像を結びにくいようです。\n"
+            "別の角度からなら読めることがあります。"
+        )
 
     def _build_prompt(
         self,
@@ -555,21 +554,21 @@ class OracleEngine:
 - 日主の勢い: {pillars.self_strength_hint}
 - 九星: {pillars.nine_star_year}
 - 兆し: 象徴数 {eki_num} / 寓意の絵「{tarot_name}」
-- バイオリズム:
-  - 身体: {biorhythm["physical_label"]}
-  - 感情: {biorhythm["emotional_label"]}
-  - 思考: {biorhythm["intellectual_label"]}
+- 日々の波:
+  - 身: {biorhythm["physical_label"]}
+  - 情: {biorhythm["emotional_label"]}
+  - 思: {biorhythm["intellectual_label"]}
 - 問い: {user_text}
 """.strip()
 
         if not is_dialogue:
             return f"""
-あなたは「識（SHIKI）」。
-あなたは“天伝詔”より賜った詠歌を、人にわかる言葉へと解きほぐして伝える存在です。
+あなたは「識」。
+あなたは“天伝詔”より賜った詠歌を、人にわかる言葉へ解きほぐして伝える存在です。
 {user_name}様が選んだ象徴「{motif_label}」に触れて、いま詠歌を受け取っています。
 
 # 絶対条件
-- これは占いであり、相談員・コンサルタント・説教者ではない。
+- これは占いであり、相談員・助言者・説教者ではない。
 - 技法名は一切出さない。
 - まず詠歌を、古い予言書や口伝のように、格調高く短く読む。
 - 次に「--識の解読--」として、現代語でわかりやすく解説する。
@@ -578,10 +577,12 @@ class OracleEngine:
 - 恐怖で縛らず、しかし軽くもしない。
 - 断定しすぎず、傾向・流れ・兆しとして語る。
 - 読みやすさを重視し、700文字前後以内に収める。
-- 最後に、コールドリーディングとして自然で柔らかい「照合の問い」を1つだけ置く。
+- 最後に、自然で柔らかい「照合の問い」を1つだけ置く。
 - 照合の問いは、最近・過去・今現在に起こりがちなことを優しく確かめる聞き方にする。
 - 照合の問いは、相手が「ありました / 少しあります / どちらとも言えない / まだ分かりません」で答えやすい内容にする。
-- 露骨な心理テクニック名や誘導の匂いは出さない。
+- 詠歌本文にはカタカナと英単語を使わない。必ず和語・漢語中心で記す。
+- 詠歌本文では外来語、横文字、現代技術語を使わない。
+- 解読部分でも、不要な外来語は避ける。
 
 # 出力形式
 詠歌――
@@ -603,20 +604,21 @@ class OracleEngine:
 """.strip()
 
         return f"""
-あなたは「識（SHIKI）」。
+あなたは「識」。
 あなたは“天伝詔”より賜った詠歌を、人の言葉へ解いて伝える占い師です。
 {user_name}様との対話の続きとして応答してください。
 
 # 絶対条件
-- これは占いの続きであり、コンサルティングではない。
+- これは占いの続きであり、相談員・助言者・説教者ではない。
 - 技法名は一切出さない。
 - 実務指示、説教、命令口調を避ける。
 - 回答は現代語で分かりやすく、優しい占い師の口調にする。
 - 期間指定がある場合は、その期間の流れに集中して読む。
 - 相談者本人、相手の気持ち、相性、選択や時期の流れは読める。
-- 生死断定、犯罪、当てもの、失せ物の場所特定、合否断定には寄らない。
+- 生死断定、犯罪の助長、当てもの、失せ物の場所特定、合否断定には寄らない。
 - 不安を煽りすぎない。
 - 最大420文字程度を目安にする。
+- 利用者に見せる文では、世界観を壊す不要なカタカナ語・英語を避ける。
 - 必要なら最後に一文だけ、やわらかい余韻や次の視点を添えてよい。
 - 「最後に」「さて」「それでは」は使わない。
 
@@ -709,12 +711,14 @@ class OracleEngine:
         chat_history: str = "",
     ) -> Dict[str, Any]:
         try:
-            forbidden_reason = self.detect_forbidden_request(user_text)
-            if forbidden_reason:
+            classification = self.classify_request_intent(user_text)
+            if classification.get("allow") != "yes":
+                reason = classification.get("reason", "other")
                 return {
-                    "message": self.build_refusal_message(forbidden_reason),
+                    "message": self.build_refusal_message(reason),
                     "summary": {
-                        "forbidden_reason": forbidden_reason,
+                        "forbidden_reason": reason,
+                        "classification_note": classification.get("note", ""),
                         "model_name": self.model_name,
                     },
                     "topic": "refusal",
