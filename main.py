@@ -26,7 +26,7 @@ from linebot.models import (
     TemplateSendMessage,
     ButtonsTemplate,
 )
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 
 from openai import OpenAI
 
@@ -37,9 +37,6 @@ from firebase_admin.firestore import DELETE_FIELD
 from oracle_engine import OracleEngine
 
 
-# =========================================================
-# 基本設定
-# =========================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s : %(message)s",
@@ -49,9 +46,6 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="SHIKI LINE Bot")
 
 
-# =========================================================
-# フェーズ
-# =========================================================
 PHASE_WAIT_INITIAL_CONSULT = "waiting_initial_consult"
 PHASE_WAIT_NAME = "waiting_name"
 PHASE_WAIT_BIRTH_DATE = "waiting_birth_date"
@@ -66,9 +60,6 @@ PHASE_WAIT_FOLLOWUP_MENU = "waiting_followup_menu"
 PHASE_DIALOGUE = "dialogue"
 PHASE_WAIT_PAYMENT = "waiting_payment"
 
-# =========================================================
-# プラン
-# =========================================================
 PLAN_FREE = "free"
 PLAN_PAID = "paid"
 PLAN_PREMIUM = "premium"
@@ -143,29 +134,6 @@ PREFECTURE_LONGITUDES = {
     "沖縄": 127.68, "沖縄県": 127.68,
 }
 
-DISALLOWED_PATTERNS = {
-    "exam": [
-        r"合格", r"不合格", r"受かる", r"落ちる", r"試験", r"受験", r"テストの結果",
-        r"内定するか", r"採用されるか",
-    ],
-    "lost_item": [
-        r"なくした", r"失くした", r"落とした", r"どこにある", r"どこですか",
-        r"財布", r"鍵", r"スマホ", r"携帯", r"探し物",
-    ],
-    "gambling": [
-        r"競馬", r"競輪", r"競艇", r"パチンコ", r"スロット", r"宝くじ",
-        r"ギャンブル", r"当てて", r"何番", r"どの馬", r"勝ち目",
-    ],
-    "crime": [
-        r"犯罪", r"盗", r"殺", r"詐欺", r"違法", r"ばれない", r"隠す",
-        r"脅す", r"傷つけ", r"闇バイト",
-    ],
-}
-
-REPEAT_PATTERNS = [
-    r"もう一度同じ", r"また同じこと", r"前と同じ", r"さっきと同じ", r"何回でも",
-]
-
 FLOW_KIND_ALIASES = {
     "本日": "today",
     "今日": "today",
@@ -175,7 +143,6 @@ FLOW_KIND_ALIASES = {
     "今月": "month",
     "month": "month",
     "半年": "halfyear",
-    "半年前後": "halfyear",
     "halfyear": "halfyear",
     "一年": "year",
     "1年": "year",
@@ -189,9 +156,6 @@ FLOW_KIND_ALIASES = {
 }
 
 
-# =========================================================
-# 環境変数
-# =========================================================
 def require_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -205,10 +169,6 @@ OPENAI_API_KEY = require_env("OPENAI_API_KEY")
 FIREBASE_SERVICE_ACCOUNT_JSON = require_env("FIREBASE_SERVICE_ACCOUNT_JSON")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 
-
-# =========================================================
-# 外部サービス初期化
-# =========================================================
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
@@ -223,10 +183,6 @@ oracle_engine = OracleEngine(
     model_name=OPENAI_MODEL,
 )
 
-
-# =========================================================
-# ユーザー単位ロック
-# =========================================================
 _user_locks: Dict[str, threading.Lock] = {}
 _user_locks_guard = threading.Lock()
 
@@ -238,9 +194,6 @@ def get_user_lock(user_id: str) -> threading.Lock:
         return _user_locks[user_id]
 
 
-# =========================================================
-# ユーティリティ
-# =========================================================
 def normalize_text(text: str) -> str:
     return unicodedata.normalize("NFKC", (text or "").strip())
 
@@ -313,7 +266,9 @@ def detect_prefecture_label(text: str) -> Optional[str]:
     t = normalize_text(text)
     for key in PREFECTURE_LONGITUDES.keys():
         if key in t:
-            return key if key.endswith("県") or key.endswith("都") or key.endswith("府") or key == "北海道" else f"{key}県"
+            if key.endswith("県") or key.endswith("都") or key.endswith("府") or key == "北海道":
+                return key
+            return f"{key}県"
     return None
 
 
@@ -355,61 +310,81 @@ def build_user_profile(user_data: Dict[str, Any]) -> Dict[str, Any]:
     return profile
 
 
-def push_text(user_id: str, text: str, quick_reply: Optional[QuickReply] = None) -> None:
-    line_bot_api.push_message(user_id, TextSendMessage(text=text, quick_reply=quick_reply))
+def push_text(user_id: str, text: str, quick_reply: Optional[QuickReply] = None) -> bool:
+    try:
+        line_bot_api.push_message(user_id, TextSendMessage(text=text, quick_reply=quick_reply))
+        return True
+    except LineBotApiError:
+        logger.exception("LINE push failed user_id=%s", user_id)
+        return False
+    except Exception:
+        logger.exception("Unexpected LINE push failure user_id=%s", user_id)
+        return False
+
+
+def push_template(user_id: str, template_message: TemplateSendMessage) -> bool:
+    try:
+        line_bot_api.push_message(user_id, template_message)
+        return True
+    except LineBotApiError:
+        logger.exception("LINE template push failed user_id=%s", user_id)
+        return False
+    except Exception:
+        logger.exception("Unexpected LINE template push failure user_id=%s", user_id)
+        return False
 
 
 def get_payment_guide_text(user_data: Dict[str, Any]) -> str:
     name = user_data.get("name", PROFILE_DEFAULT_NAME)
     return (
         f"{name}様は、初回の詠歌までは受け取れています。\n"
-        "本日・今週・今月の流れをさらに読むには、有料プランをご利用ください。\n\n"
-        f"決済ページ: {PAYMENT_URL}\n\n"
-        "決済後に『決済完了』と送ってください。"
+        "本日・今週・今月の流れをさらに読むには、『深読みの扉』をお開きください。\n\n"
+        f"導きの頁: {PAYMENT_URL}\n\n"
+        "開いた後に『決済完了』と送ってください。"
     )
 
 
 def get_premium_guide_text(user_data: Dict[str, Any]) -> str:
     name = user_data.get("name", PROFILE_DEFAULT_NAME)
     return (
-        f"{name}様はいま有料プランです。\n"
-        "半年・一年の深い流れを読むには、プレミアムをご利用ください。\n\n"
-        f"プレミアム決済ページ: {PREMIUM_PAYMENT_URL}\n\n"
-        "決済後に『プレミアム決済完了』と送ってください。"
+        f"{name}様はいま『深読みの扉』の内にあります。\n"
+        "半年・一年の深い流れを読むには、『深奥の扉』をお開きください。\n\n"
+        f"導きの頁: {PREMIUM_PAYMENT_URL}\n\n"
+        "開いた後に『深奥完了』と送ってください。"
     )
 
 
-def send_initial_greeting(user_id: str) -> None:
-    push_text(
+def send_initial_greeting(user_id: str) -> bool:
+    return push_text(
         user_id,
-        "私は”識”。天伝詔より賜った詠歌を、あなたに伝える存在です。今回はどの様な想いをお持ちになりましたか？"
+        "私は“識”。天伝詔より賜った詠歌を、あなたに伝える存在です。今回はどの様な想いをお持ちになりましたか？"
     )
 
 
-def send_birthday_picker(user_id: str, message: str) -> None:
+def send_birthday_picker(user_id: str, message: str) -> bool:
     template = ButtonsTemplate(
         text=message,
         actions=[
             DatetimePickerAction(
-                label="カレンダーで選択",
+                label="暦で選ぶ",
                 data="action=set_birthday",
                 mode="date",
                 initial="1995-01-01",
             )
         ],
     )
-    line_bot_api.push_message(
+    return push_template(
         user_id,
-        TemplateSendMessage(alt_text="誕生日選択", template=template),
+        TemplateSendMessage(alt_text="生まれた日を選ぶ", template=template),
     )
 
 
-def send_time_picker(user_id: str) -> None:
+def send_time_picker(user_id: str) -> bool:
     template = ButtonsTemplate(
         text="生まれた時刻は分かりますか？",
         actions=[
             DatetimePickerAction(
-                label="時刻を選択",
+                label="時刻を選ぶ",
                 data="action=set_birthtime",
                 mode="time",
                 initial="12:00",
@@ -421,21 +396,21 @@ def send_time_picker(user_id: str) -> None:
             ),
         ],
     )
-    line_bot_api.push_message(
+    return push_template(
         user_id,
-        TemplateSendMessage(alt_text="時刻選択", template=template),
+        TemplateSendMessage(alt_text="生まれた時刻を選ぶ", template=template),
     )
 
 
-def send_birth_prefecture_prompt(user_id: str) -> None:
-    push_text(
+def send_birth_prefecture_prompt(user_id: str) -> bool:
+    return push_text(
         user_id,
         "最後に、出生地の都道府県を教えてください。\n"
         "分からない場合は『不明』、海外なら『海外』でも大丈夫です。"
     )
 
 
-def send_profile_confirm(user_id: str, date_str: str, time_str: str, prefecture_str: str) -> None:
+def send_profile_confirm(user_id: str, date_str: str, time_str: str, prefecture_str: str) -> bool:
     text = (
         f"生年月日: {date_str}\n"
         f"出生時刻: {time_str}\n"
@@ -458,10 +433,10 @@ def send_profile_confirm(user_id: str, date_str: str, time_str: str, prefecture_
             )
         ),
     ]
-    push_text(user_id, text, quick_reply=QuickReply(items=items))
+    return push_text(user_id, text, quick_reply=QuickReply(items=items))
 
 
-def send_restart_confirm(user_id: str) -> None:
+def send_restart_confirm(user_id: str) -> bool:
     items = [
         QuickReplyButton(
             action=PostbackAction(
@@ -478,7 +453,7 @@ def send_restart_confirm(user_id: str) -> None:
             )
         ),
     ]
-    push_text(user_id, "新しい想いについて、あらためて詠歌を読みますか？", quick_reply=QuickReply(items=items))
+    return push_text(user_id, "新しい想いについて、あらためて詠歌を読みますか？", quick_reply=QuickReply(items=items))
 
 
 def send_motif_picker(user_id: str) -> List[str]:
@@ -501,7 +476,7 @@ def send_motif_picker(user_id: str) -> List[str]:
     return sampled
 
 
-def send_coldread_options(user_id: str) -> None:
+def send_coldread_options(user_id: str) -> bool:
     items = [
         QuickReplyButton(
             action=PostbackAction(
@@ -532,68 +507,40 @@ def send_coldread_options(user_id: str) -> None:
             )
         ),
     ]
-    push_text(
+    return push_text(
         user_id,
         "いまの詠歌との響き方に近いものを選んでください。",
         quick_reply=QuickReply(items=items),
     )
 
 
-def send_followup_menu(user_id: str, user_data: Dict[str, Any]) -> None:
+def send_followup_menu(user_id: str, user_data: Dict[str, Any]) -> bool:
     consult = user_data.get("last_consult_label", "この想い")
     buttons = [
         QuickReplyButton(
-            action=PostbackAction(
-                label="本日",
-                data="action=followup_menu&kind=today",
-                display_text="本日",
-            )
+            action=PostbackAction(label="本日", data="action=followup_menu&kind=today", display_text="本日")
         ),
         QuickReplyButton(
-            action=PostbackAction(
-                label="今週",
-                data="action=followup_menu&kind=week",
-                display_text="今週",
-            )
+            action=PostbackAction(label="今週", data="action=followup_menu&kind=week", display_text="今週")
         ),
         QuickReplyButton(
-            action=PostbackAction(
-                label="今月",
-                data="action=followup_menu&kind=month",
-                display_text="今月",
-            )
+            action=PostbackAction(label="今月", data="action=followup_menu&kind=month", display_text="今月")
         ),
         QuickReplyButton(
-            action=PostbackAction(
-                label="半年",
-                data="action=followup_menu&kind=halfyear",
-                display_text="半年",
-            )
+            action=PostbackAction(label="半年", data="action=followup_menu&kind=halfyear", display_text="半年")
         ),
         QuickReplyButton(
-            action=PostbackAction(
-                label="一年",
-                data="action=followup_menu&kind=year",
-                display_text="一年",
-            )
+            action=PostbackAction(label="一年", data="action=followup_menu&kind=year", display_text="一年")
         ),
         QuickReplyButton(
-            action=PostbackAction(
-                label="別の想いを読む",
-                data="action=followup_menu&kind=other",
-                display_text="別の想いを読む",
-            )
+            action=PostbackAction(label="別の想いを読む", data="action=followup_menu&kind=other", display_text="別の想いを読む")
         ),
         QuickReplyButton(
-            action=PostbackAction(
-                label="ここで終える",
-                data="action=followup_menu&kind=end",
-                display_text="ここで終える",
-            )
+            action=PostbackAction(label="ここで終える", data="action=followup_menu&kind=end", display_text="ここで終える")
         ),
     ]
 
-    push_text(
+    return push_text(
         user_id,
         f"どの流れを読みたいですか？\n今の想い: {consult}について",
         quick_reply=QuickReply(items=buttons[:13]),
@@ -779,22 +726,6 @@ def build_consult_label(text: str) -> str:
     return t[:18] + "…"
 
 
-def detect_disallowed_reason(text: str) -> Optional[str]:
-    target = normalize_text(text)
-    for reason, patterns in DISALLOWED_PATTERNS.items():
-        for p in patterns:
-            if re.search(p, target, re.IGNORECASE):
-                return reason
-    for p in REPEAT_PATTERNS:
-        if re.search(p, target, re.IGNORECASE):
-            return "repeat"
-    return None
-
-
-def build_disallowed_message(reason: str) -> str:
-    return OracleEngine.build_refusal_message(reason)
-
-
 def build_coldread_ack(value: str) -> str:
     if value == "yes":
         return "やはり、その揺れはすでに水面に現れていたのですね。では次に、どの流れを読みましょうか。"
@@ -811,9 +742,6 @@ def is_same_consult_repeated(user_data: Dict[str, Any], consult_text: str) -> bo
     return bool(last_text and new_text and last_text == new_text)
 
 
-# =========================================================
-# 本体ロジック
-# =========================================================
 def process_and_push_reply(
     user_id: str,
     user_text: str,
@@ -837,13 +765,15 @@ def process_and_push_reply(
             )
 
             if text == "リセット":
+                keep_plan = user_data.get("plan_status", PLAN_FREE)
+                keep_free = int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS))
                 reset_user(user_id)
                 save_user(
                     user_id,
                     {
                         "phase": PHASE_WAIT_INITIAL_CONSULT,
-                        "plan_status": user_data.get("plan_status", PLAN_FREE),
-                        "free_sessions_remaining": int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS)),
+                        "plan_status": keep_plan,
+                        "free_sessions_remaining": keep_free,
                     },
                 )
                 send_initial_greeting(user_id)
@@ -863,24 +793,19 @@ def process_and_push_reply(
 
             if text == "決済完了":
                 save_user(user_id, {"plan_status": PLAN_PAID, "phase": PHASE_WAIT_FOLLOWUP_MENU})
-                push_text(user_id, "有料プランとして記録しました。では、どの流れを読みましょうか。")
+                push_text(user_id, "『深読みの扉』が開かれました。では、どの流れを読みましょうか。")
                 send_followup_menu(user_id, load_user(user_id))
                 return
 
-            if text == "プレミアム決済完了":
+            if text == "深奥完了":
                 save_user(user_id, {"plan_status": PLAN_PREMIUM, "phase": PHASE_WAIT_FOLLOWUP_MENU})
-                push_text(user_id, "プレミアムとして記録しました。では、より長い巡りまで読んでいきましょう。")
+                push_text(user_id, "『深奥の扉』が開かれました。では、より長い巡りまで読んでいきましょう。")
                 send_followup_menu(user_id, load_user(user_id))
                 return
 
             if phase == PHASE_WAIT_INITIAL_CONSULT:
                 if not text:
                     send_initial_greeting(user_id)
-                    return
-
-                reason = detect_disallowed_reason(text)
-                if reason:
-                    push_text(user_id, build_disallowed_message(reason))
                     return
 
                 save_user(
@@ -998,10 +923,11 @@ def process_and_push_reply(
                             "phase": PHASE_WAIT_PROFILE_CONFIRM,
                         },
                     )
+                    latest = load_user(user_id)
                     send_profile_confirm(
                         user_id,
-                        user_data.get("birth_date", "未設定"),
-                        finalize_profile_confirm_text(load_user(user_id)),
+                        latest.get("birth_date", "未設定"),
+                        finalize_profile_confirm_text(latest),
                         "不明（代表経度で計算）",
                     )
                     return
@@ -1025,10 +951,11 @@ def process_and_push_reply(
                         "phase": PHASE_WAIT_PROFILE_CONFIRM,
                     },
                 )
+                latest = load_user(user_id)
                 send_profile_confirm(
                     user_id,
-                    user_data.get("birth_date", "未設定"),
-                    finalize_profile_confirm_text(load_user(user_id)),
+                    latest.get("birth_date", "未設定"),
+                    finalize_profile_confirm_text(latest),
                     detected_pref or t,
                 )
                 return
@@ -1076,11 +1003,6 @@ def process_and_push_reply(
                     yn = normalize_yes_no(text)
 
                 if yn is None and text:
-                    reason = detect_disallowed_reason(text)
-                    if reason:
-                        push_text(user_id, build_disallowed_message(reason))
-                        return
-
                     if is_same_consult_repeated(user_data, text):
                         push_text(
                             user_id,
@@ -1192,14 +1114,10 @@ def process_and_push_reply(
                 missing = [k for k in required_keys if k not in profile]
                 if missing:
                     logger.warning("profile missing keys user_id=%s missing=%s profile=%s", user_id, missing, profile)
-                    push_text(user_id, "刻印に不足があるようです。リセットして、もう一度最初から整えてください。")
+                    push_text(user_id, "刻印に不足があるようです。もう一度、最初から整えてください。")
                     return
 
                 consult_text = user_data.get("pending_consult", "これからの運勢")
-                reason = detect_disallowed_reason(consult_text)
-                if reason:
-                    push_text(user_id, build_disallowed_message(reason))
-                    return
 
                 if is_same_consult_repeated(user_data, consult_text):
                     push_text(
@@ -1409,17 +1327,20 @@ def process_and_push_reply(
             save_user(user_id, {"phase": PHASE_WAIT_RESTART_CONFIRM})
             push_text(user_id, "少し視界が揺らぎました。もう一度、いま読みたい想いを教えてください。")
 
+        except LineBotApiError:
+            logger.exception("LINE API error while processing reply for user_id=%s", user_id)
+            return
+
         except Exception:
             logger.exception("Error while processing reply for user_id=%s", user_id)
             try:
-                push_text(user_id, "識の視界が揺らぎました。もう一度だけ、同じ内容を送ってみてください。")
+                ok = push_text(user_id, "識の視界が揺らぎました。もう一度だけ、同じ内容を送ってみてください。")
+                if not ok:
+                    logger.error("Fallback push also failed for user_id=%s", user_id)
             except Exception:
                 logger.exception("Failed to push fallback message for user_id=%s", user_id)
 
 
-# =========================================================
-# FastAPI / LINE callback
-# =========================================================
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
