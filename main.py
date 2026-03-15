@@ -52,14 +52,16 @@ app = FastAPI(title="SHIKI LINE Bot")
 # =========================================================
 # フェーズ
 # =========================================================
+PHASE_WAIT_INITIAL_CONSULT = "waiting_initial_consult"
 PHASE_WAIT_NAME = "waiting_name"
 PHASE_WAIT_BIRTH_DATE = "waiting_birth_date"
 PHASE_WAIT_BIRTH_TIME = "waiting_birth_time"
+PHASE_WAIT_BIRTH_PREFECTURE = "waiting_birth_prefecture"
 PHASE_WAIT_PROFILE_CONFIRM = "waiting_profile_confirm"
 PHASE_WAIT_RESTART_CONFIRM = "waiting_restart_confirm"
 PHASE_WAIT_CONSULT_DETAIL = "waiting_consult_detail"
 PHASE_WAIT_MOTIF = "waiting_motif"
-PHASE_WAIT_FOLLOWUP_CONFIRM = "waiting_followup_confirm"
+PHASE_WAIT_COLDREAD_RESPONSE = "waiting_coldread_response"
 PHASE_WAIT_FOLLOWUP_MENU = "waiting_followup_menu"
 PHASE_DIALOGUE = "dialogue"
 PHASE_WAIT_PAYMENT = "waiting_payment"
@@ -90,6 +92,101 @@ ALL_MOTIFS = [
     "白い孔雀", "秘められた林檎", "古の地図", "時の歯車", "深海の真珠", "暁の鳥", "黄昏の雫", "不滅の炎", "氷の心臓", "奏でる竪琴",
     "空の器", "叡智の梟", "秘密の鍵穴", "約束の指輪", "流れる雲", "不動の岩", "踊る影", "導きの杖", "遮られた眼", "語らぬ仮面"
 ]
+
+PREFECTURE_LONGITUDES = {
+    "北海道": 141.35,
+    "青森": 140.74, "青森県": 140.74,
+    "岩手": 141.15, "岩手県": 141.15,
+    "宮城": 140.87, "宮城県": 140.87,
+    "秋田": 140.10, "秋田県": 140.10,
+    "山形": 140.36, "山形県": 140.36,
+    "福島": 140.47, "福島県": 140.47,
+    "茨城": 140.45, "茨城県": 140.45,
+    "栃木": 139.88, "栃木県": 139.88,
+    "群馬": 139.06, "群馬県": 139.06,
+    "埼玉": 139.65, "埼玉県": 139.65,
+    "千葉": 140.12, "千葉県": 140.12,
+    "東京": 139.69, "東京都": 139.69,
+    "神奈川": 139.64, "神奈川県": 139.64,
+    "新潟": 139.02, "新潟県": 139.02,
+    "富山": 137.21, "富山県": 137.21,
+    "石川": 136.65, "石川県": 136.65,
+    "福井": 136.22, "福井県": 136.22,
+    "山梨": 138.57, "山梨県": 138.57,
+    "長野": 138.18, "長野県": 138.18,
+    "岐阜": 136.76, "岐阜県": 136.76,
+    "静岡": 138.38, "静岡県": 138.38,
+    "愛知": 136.91, "愛知県": 136.91,
+    "三重": 136.51, "三重県": 136.51,
+    "滋賀": 135.87, "滋賀県": 135.87,
+    "京都": 135.77, "京都府": 135.77,
+    "大阪": 135.50, "大阪府": 135.50,
+    "兵庫": 135.18, "兵庫県": 135.18,
+    "奈良": 135.83, "奈良県": 135.83,
+    "和歌山": 135.17, "和歌山県": 135.17,
+    "鳥取": 134.24, "鳥取県": 134.24,
+    "島根": 132.75, "島根県": 132.75,
+    "岡山": 133.93, "岡山県": 133.93,
+    "広島": 132.46, "広島県": 132.46,
+    "山口": 131.47, "山口県": 131.47,
+    "徳島": 134.56, "徳島県": 134.56,
+    "香川": 134.04, "香川県": 134.04,
+    "愛媛": 132.77, "愛媛県": 132.77,
+    "高知": 133.53, "高知県": 133.53,
+    "福岡": 130.42, "福岡県": 130.42,
+    "佐賀": 130.30, "佐賀県": 130.30,
+    "長崎": 129.88, "長崎県": 129.88,
+    "熊本": 130.74, "熊本県": 130.74,
+    "大分": 131.61, "大分県": 131.61,
+    "宮崎": 131.42, "宮崎県": 131.42,
+    "鹿児島": 130.56, "鹿児島県": 130.56,
+    "沖縄": 127.68, "沖縄県": 127.68,
+}
+
+DISALLOWED_PATTERNS = {
+    "exam": [
+        r"合格", r"不合格", r"受かる", r"落ちる", r"試験", r"受験", r"テストの結果",
+        r"内定するか", r"採用されるか",
+    ],
+    "lost_item": [
+        r"なくした", r"失くした", r"落とした", r"どこにある", r"どこですか",
+        r"財布", r"鍵", r"スマホ", r"携帯", r"探し物",
+    ],
+    "gambling": [
+        r"競馬", r"競輪", r"競艇", r"パチンコ", r"スロット", r"宝くじ",
+        r"ギャンブル", r"当てて", r"何番", r"どの馬", r"勝ち目",
+    ],
+    "crime": [
+        r"犯罪", r"盗", r"殺", r"詐欺", r"違法", r"ばれない", r"隠す",
+        r"脅す", r"傷つけ", r"闇バイト",
+    ],
+}
+
+REPEAT_PATTERNS = [
+    r"もう一度同じ", r"また同じこと", r"前と同じ", r"さっきと同じ", r"何回でも",
+]
+
+FLOW_KIND_ALIASES = {
+    "本日": "today",
+    "今日": "today",
+    "today": "today",
+    "今週": "week",
+    "week": "week",
+    "今月": "month",
+    "month": "month",
+    "半年": "halfyear",
+    "半年前後": "halfyear",
+    "halfyear": "halfyear",
+    "一年": "year",
+    "1年": "year",
+    "year": "year",
+    "別の想い": "other",
+    "別のこと": "other",
+    "other": "other",
+    "終える": "end",
+    "終了": "end",
+    "end": "end",
+}
 
 
 # =========================================================
@@ -204,6 +301,22 @@ def safe_float(value: Any, default: Optional[float] = None) -> Optional[float]:
         return default
 
 
+def detect_prefecture_longitude(text: str) -> Optional[float]:
+    t = normalize_text(text)
+    for key, lon in PREFECTURE_LONGITUDES.items():
+        if key in t:
+            return lon
+    return None
+
+
+def detect_prefecture_label(text: str) -> Optional[str]:
+    t = normalize_text(text)
+    for key in PREFECTURE_LONGITUDES.keys():
+        if key in t:
+            return key if key.endswith("県") or key.endswith("都") or key.endswith("府") or key == "北海道" else f"{key}県"
+    return None
+
+
 def build_user_profile(user_data: Dict[str, Any]) -> Dict[str, Any]:
     profile: Dict[str, Any] = {
         "name": user_data.get("name", PROFILE_DEFAULT_NAME)
@@ -224,7 +337,11 @@ def build_user_profile(user_data: Dict[str, Any]) -> Dict[str, Any]:
     birth_hour = safe_int(user_data.get("birth_hour"), None)
     birth_minute = safe_int(user_data.get("birth_minute"), DEFAULT_UNKNOWN_MINUTE)
     birth_second = safe_int(user_data.get("birth_second"), DEFAULT_UNKNOWN_SECOND)
-    birth_longitude = safe_float(user_data.get("birth_longitude"), DEFAULT_BIRTH_LONGITUDE)
+
+    if user_data.get("birth_longitude") is not None:
+        birth_longitude = safe_float(user_data.get("birth_longitude"), DEFAULT_BIRTH_LONGITUDE)
+    else:
+        birth_longitude = safe_float(user_data.get("birth_place_longitude"), DEFAULT_BIRTH_LONGITUDE)
 
     if birth_hour is not None:
         profile["birth_hour"] = birth_hour
@@ -245,8 +362,8 @@ def push_text(user_id: str, text: str, quick_reply: Optional[QuickReply] = None)
 def get_payment_guide_text(user_data: Dict[str, Any]) -> str:
     name = user_data.get("name", PROFILE_DEFAULT_NAME)
     return (
-        f"{name}様の無料観測枠は使い切られています。\n"
-        f"今週の流れの先、今日の運気や今月の流れまで深く視るには有料プランをご利用ください。\n\n"
+        f"{name}様は、初回の詠歌までは受け取れています。\n"
+        "本日・今週・今月の流れをさらに読むには、有料プランをご利用ください。\n\n"
         f"決済ページ: {PAYMENT_URL}\n\n"
         "決済後に『決済完了』と送ってください。"
     )
@@ -256,8 +373,16 @@ def get_premium_guide_text(user_data: Dict[str, Any]) -> str:
     name = user_data.get("name", PROFILE_DEFAULT_NAME)
     return (
         f"{name}様はいま有料プランです。\n"
-        f"一年先までの深い流れや、毎朝の運勢配信を受けるには重課金プランをご利用ください。\n\n"
-        f"重課金プラン: {PREMIUM_PAYMENT_URL}"
+        "半年・一年の深い流れを読むには、プレミアムをご利用ください。\n\n"
+        f"プレミアム決済ページ: {PREMIUM_PAYMENT_URL}\n\n"
+        "決済後に『プレミアム決済完了』と送ってください。"
+    )
+
+
+def send_initial_greeting(user_id: str) -> None:
+    push_text(
+        user_id,
+        "【私は”識”。天伝詔より賜った詠歌を、あなたに伝える存在です。今回はどの様な想いをお持ちになりましたか？】"
     )
 
 
@@ -302,8 +427,21 @@ def send_time_picker(user_id: str) -> None:
     )
 
 
-def send_profile_confirm(user_id: str, date_str: str, time_str: str) -> None:
-    text = f"生年月日: {date_str}\n出生時刻: {time_str}\n\nこちらの刻印でよろしいでしょうか？"
+def send_birth_prefecture_prompt(user_id: str) -> None:
+    push_text(
+        user_id,
+        "最後に、出生地の都道府県を教えてください。\n"
+        "分からない場合は『不明』、海外なら『海外』でも大丈夫です。"
+    )
+
+
+def send_profile_confirm(user_id: str, date_str: str, time_str: str, prefecture_str: str) -> None:
+    text = (
+        f"生年月日: {date_str}\n"
+        f"出生時刻: {time_str}\n"
+        f"出生地: {prefecture_str}\n\n"
+        "こちらの刻印でよろしいでしょうか？"
+    )
     items = [
         QuickReplyButton(
             action=PostbackAction(
@@ -340,7 +478,7 @@ def send_restart_confirm(user_id: str) -> None:
             )
         ),
     ]
-    push_text(user_id, "新たなる観測を始めますか？", quick_reply=QuickReply(items=items))
+    push_text(user_id, "新しい想いについて、あらためて詠歌を読みますか？", quick_reply=QuickReply(items=items))
 
 
 def send_motif_picker(user_id: str) -> List[str]:
@@ -363,96 +501,101 @@ def send_motif_picker(user_id: str) -> List[str]:
     return sampled
 
 
-def send_followup_confirm(user_id: str) -> None:
+def send_coldread_options(user_id: str) -> None:
     items = [
         QuickReplyButton(
-            action=PostbackAction(label="はい", data="action=followup_confirm&res=yes", display_text="はい")
+            action=PostbackAction(
+                label="ありました",
+                data="action=coldread_reply&value=yes",
+                display_text="ありました",
+            )
         ),
         QuickReplyButton(
-            action=PostbackAction(label="いいえ", data="action=followup_confirm&res=no", display_text="いいえ")
+            action=PostbackAction(
+                label="少しあります",
+                data="action=coldread_reply&value=partial",
+                display_text="少しあります",
+            )
+        ),
+        QuickReplyButton(
+            action=PostbackAction(
+                label="どちらとも言えない",
+                data="action=coldread_reply&value=unclear",
+                display_text="どちらとも言えない",
+            )
+        ),
+        QuickReplyButton(
+            action=PostbackAction(
+                label="まだ分かりません",
+                data="action=coldread_reply&value=unknown",
+                display_text="まだ分かりません",
+            )
         ),
     ]
     push_text(
         user_id,
-        "さらに神託の続きを解きますか？",
+        "いまの詠歌との響き方に近いものを選んでください。",
         quick_reply=QuickReply(items=items),
     )
 
 
 def send_followup_menu(user_id: str, user_data: Dict[str, Any]) -> None:
-    consult = user_data.get("last_consult_label", "今回の相談")
-    plan = user_data.get("plan_status", PLAN_FREE)
-
+    consult = user_data.get("last_consult_label", "この想い")
     buttons = [
         QuickReplyButton(
             action=PostbackAction(
-                label="今回の相談を深く見る",
-                data="action=followup_menu&kind=consult",
-                display_text="今回の相談を深く見る",
+                label="本日",
+                data="action=followup_menu&kind=today",
+                display_text="本日",
             )
         ),
         QuickReplyButton(
             action=PostbackAction(
-                label="今週の流れ",
+                label="今週",
                 data="action=followup_menu&kind=week",
-                display_text="今週の流れ",
+                display_text="今週",
             )
         ),
-    ]
-
-    if plan in {PLAN_PAID, PLAN_PREMIUM}:
-        buttons.append(
-            QuickReplyButton(
-                action=PostbackAction(
-                    label="今日の運気",
-                    data="action=followup_menu&kind=today",
-                    display_text="今日の運気",
-                )
-            )
-        )
-        buttons.append(
-            QuickReplyButton(
-                action=PostbackAction(
-                    label="この一か月",
-                    data="action=followup_menu&kind=month",
-                    display_text="この一か月",
-                )
-            )
-        )
-
-    if plan == PLAN_PREMIUM:
-        buttons.append(
-            QuickReplyButton(
-                action=PostbackAction(
-                    label="この一年",
-                    data="action=followup_menu&kind=year",
-                    display_text="この一年",
-                )
-            )
-        )
-
-    buttons.append(
         QuickReplyButton(
             action=PostbackAction(
-                label="別のことを聞く",
-                data="action=followup_menu&kind=other",
-                display_text="別のことを聞く",
+                label="今月",
+                data="action=followup_menu&kind=month",
+                display_text="今月",
             )
-        )
-    )
-    buttons.append(
+        ),
+        QuickReplyButton(
+            action=PostbackAction(
+                label="半年",
+                data="action=followup_menu&kind=halfyear",
+                display_text="半年",
+            )
+        ),
+        QuickReplyButton(
+            action=PostbackAction(
+                label="一年",
+                data="action=followup_menu&kind=year",
+                display_text="一年",
+            )
+        ),
+        QuickReplyButton(
+            action=PostbackAction(
+                label="別の想いを読む",
+                data="action=followup_menu&kind=other",
+                display_text="別の想いを読む",
+            )
+        ),
         QuickReplyButton(
             action=PostbackAction(
                 label="ここで終える",
                 data="action=followup_menu&kind=end",
                 display_text="ここで終える",
             )
-        )
-    )
+        ),
+    ]
 
     push_text(
         user_id,
-        f"どの面をもう少し解きましょうか？\nいまの主題: {consult}",
+        f"どの流れを読みたいですか？\n今の想い: {consult}について",
         quick_reply=QuickReply(items=buttons[:13]),
     )
 
@@ -476,6 +619,7 @@ def get_messages_ref(user_id: str, session_id: str):
 def load_user(user_id: str) -> Dict[str, Any]:
     snap = get_user_ref(user_id).get()
     data = snap.to_dict() or {}
+    data["__exists__"] = snap.exists
 
     if "plan_status" not in data:
         data["plan_status"] = PLAN_FREE
@@ -483,12 +627,16 @@ def load_user(user_id: str) -> Dict[str, Any]:
         data["free_sessions_remaining"] = DEFAULT_FREE_SESSIONS
 
     if not data.get("phase"):
-        if not data.get("name"):
+        if not data.get("pending_consult") and not data.get("name"):
+            data["phase"] = PHASE_WAIT_INITIAL_CONSULT
+        elif not data.get("name"):
             data["phase"] = PHASE_WAIT_NAME
         elif not data.get("birth_date"):
             data["phase"] = PHASE_WAIT_BIRTH_DATE
         elif data.get("birth_hour") is None:
             data["phase"] = PHASE_WAIT_BIRTH_TIME
+        elif not data.get("birth_prefecture") and data.get("birth_place_unknown") is not True:
+            data["phase"] = PHASE_WAIT_BIRTH_PREFECTURE
         elif not data.get("is_profile_confirmed"):
             data["phase"] = PHASE_WAIT_PROFILE_CONFIRM
         elif data.get("is_dialogue_mode"):
@@ -527,6 +675,14 @@ def finalize_profile_confirm_text(user_data: Dict[str, Any]) -> str:
     return f"{int(hour):02d}:{int(minute):02d}頃"
 
 
+def finalize_prefecture_confirm_text(user_data: Dict[str, Any]) -> str:
+    if user_data.get("birth_prefecture"):
+        return str(user_data.get("birth_prefecture"))
+    if user_data.get("birth_place_unknown"):
+        return "不明（代表経度で計算）"
+    return "未設定"
+
+
 def log_usage_if_any(result: Dict[str, Any], user_id: str) -> None:
     try:
         summary = result.get("summary", {}) or {}
@@ -537,7 +693,7 @@ def log_usage_if_any(result: Dict[str, Any], user_id: str) -> None:
         logger.exception("usage log failed")
 
 
-def can_start_paid_reading(user_data: Dict[str, Any]) -> bool:
+def can_start_initial_reading(user_data: Dict[str, Any]) -> bool:
     if user_data.get("plan_status") in {PLAN_PAID, PLAN_PREMIUM}:
         return True
     return int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS)) > 0
@@ -597,18 +753,62 @@ def append_session_message(
 
 
 def build_followup_prompt(kind: str, user_data: Dict[str, Any]) -> str:
-    consult = user_data.get("last_consult_text", "今回の相談")
-    if kind == "consult":
-        return f"先ほどの神託を踏まえて、今回の相談『{consult}』をもう少し深く、やさしく解き明かしてください。"
-    if kind == "week":
-        return f"今回の相談『{consult}』に関して、次の月曜日から始まる1週間の流れを占いとして解き明かしてください。"
+    consult = user_data.get("last_consult_text", "今回の想い")
     if kind == "today":
-        return f"今回の相談『{consult}』に関して、今日一日の運気と心の流れを占いとして解き明かしてください。"
+        return f"今の想い『{consult}』に関して、本日一日の感情・対人・判断の流れを、占いとしてやさしく読んでください。"
+    if kind == "week":
+        return f"今の想い『{consult}』に関して、次の月曜日から始まる一週間の流れを、転機と気配を中心に占いとして読んでください。"
     if kind == "month":
-        return f"今回の相談『{consult}』に関して、この一か月の流れを占いとして解き明かしてください。"
+        return f"今の想い『{consult}』に関して、今月の流れを、心の揺れ・対人・動きやすい時期を含めて占いとして読んでください。"
+    if kind == "halfyear":
+        return f"今の想い『{consult}』に関して、これから半年の流れを、転換点や整い方を中心に占いとして読んでください。"
     if kind == "year":
-        return f"今回の相談『{consult}』に関して、この一年の流れを占いとして解き明かしてください。"
-    return f"今回の相談『{consult}』について、神託の続きをやさしく解き明かしてください。"
+        return f"今の想い『{consult}』に関して、これから一年の流れを、節目や運の巡りを中心に占いとして読んでください。"
+    return f"今の想い『{consult}』について、やさしく流れを読んでください。"
+
+
+def normalize_flow_kind(text: str) -> Optional[str]:
+    t = normalize_text(text)
+    return FLOW_KIND_ALIASES.get(t)
+
+
+def build_consult_label(text: str) -> str:
+    t = normalize_text(text)
+    if len(t) <= 18:
+        return t
+    return t[:18] + "…"
+
+
+def detect_disallowed_reason(text: str) -> Optional[str]:
+    target = normalize_text(text)
+    for reason, patterns in DISALLOWED_PATTERNS.items():
+        for p in patterns:
+            if re.search(p, target, re.IGNORECASE):
+                return reason
+    for p in REPEAT_PATTERNS:
+        if re.search(p, target, re.IGNORECASE):
+            return "repeat"
+    return None
+
+
+def build_disallowed_message(reason: str) -> str:
+    return OracleEngine.build_refusal_message(reason)
+
+
+def build_coldread_ack(value: str) -> str:
+    if value == "yes":
+        return "やはり、その揺れはすでに水面に現れていたのですね。では次に、どの流れを読みましょうか。"
+    if value == "partial":
+        return "まだ輪郭は淡いものの、すでに兆しは触れ始めているようです。では次に、どの流れを読みましょうか。"
+    if value == "unclear":
+        return "まだ形が定まりきっていないのかもしれません。曖昧なままでも大丈夫です。では次に、どの流れを読みましょうか。"
+    return "いま無理に答えを決めなくても大丈夫です。流れから先に読むこともできます。では次に、どの流れを読みましょうか。"
+
+
+def is_same_consult_repeated(user_data: Dict[str, Any], consult_text: str) -> bool:
+    last_text = normalize_text(user_data.get("last_consult_text", ""))
+    new_text = normalize_text(consult_text)
+    return bool(last_text and new_text and last_text == new_text)
 
 
 # =========================================================
@@ -621,6 +821,7 @@ def process_and_push_reply(
     selected_date: Optional[str] = None,
     selected_time: Optional[str] = None,
     followup_kind: Optional[str] = None,
+    coldread_value: Optional[str] = None,
 ) -> None:
     lock = get_user_lock(user_id)
 
@@ -628,31 +829,74 @@ def process_and_push_reply(
         try:
             user_data = load_user(user_id)
             text = normalize_text(user_text)
-            phase = user_data.get("phase", PHASE_WAIT_NAME)
+            phase = user_data.get("phase", PHASE_WAIT_INITIAL_CONSULT)
 
             logger.info(
-                "process start user_id=%s phase=%s text=%s motif=%s date=%s time=%s followup=%s",
-                user_id, phase, text, motif_label, selected_date, selected_time, followup_kind
+                "process start user_id=%s phase=%s text=%s motif=%s date=%s time=%s followup=%s coldread=%s",
+                user_id, phase, text, motif_label, selected_date, selected_time, followup_kind, coldread_value
             )
 
             if text == "リセット":
                 reset_user(user_id)
-                push_text(
+                save_user(
                     user_id,
-                    "ようこそ、探究者の方。新たな観測を始めましょう。\n"
-                    "まずは、あなた様をどのようにお呼びすればよろしいですか？"
-                    "（『〇〇です』などは付けず、お呼びするお名前のみを送信してください）"
+                    {
+                        "phase": PHASE_WAIT_INITIAL_CONSULT,
+                        "plan_status": user_data.get("plan_status", PLAN_FREE),
+                        "free_sessions_remaining": int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS)),
+                    },
                 )
+                send_initial_greeting(user_id)
+                return
+
+            if not user_data.get("__exists__"):
+                save_user(
+                    user_id,
+                    {
+                        "phase": PHASE_WAIT_INITIAL_CONSULT,
+                        "plan_status": PLAN_FREE,
+                        "free_sessions_remaining": DEFAULT_FREE_SESSIONS,
+                    },
+                )
+                send_initial_greeting(user_id)
                 return
 
             if text == "決済完了":
-                save_user(user_id, {"plan_status": PLAN_PAID, "phase": PHASE_WAIT_RESTART_CONFIRM})
-                push_text(user_id, "決済完了として記録しました。では、改めて今視たいことを教えてください。")
+                save_user(user_id, {"plan_status": PLAN_PAID, "phase": PHASE_WAIT_FOLLOWUP_MENU})
+                push_text(user_id, "有料プランとして記録しました。では、どの流れを読みましょうか。")
+                send_followup_menu(user_id, load_user(user_id))
                 return
 
             if text == "プレミアム決済完了":
-                save_user(user_id, {"plan_status": PLAN_PREMIUM, "phase": PHASE_WAIT_RESTART_CONFIRM})
-                push_text(user_id, "重課金プランとして記録しました。では、さらに深い流れを視ていきましょう。")
+                save_user(user_id, {"plan_status": PLAN_PREMIUM, "phase": PHASE_WAIT_FOLLOWUP_MENU})
+                push_text(user_id, "プレミアムとして記録しました。では、より長い巡りまで読んでいきましょう。")
+                send_followup_menu(user_id, load_user(user_id))
+                return
+
+            if phase == PHASE_WAIT_INITIAL_CONSULT:
+                if not text:
+                    send_initial_greeting(user_id)
+                    return
+
+                reason = detect_disallowed_reason(text)
+                if reason:
+                    push_text(user_id, build_disallowed_message(reason))
+                    return
+
+                save_user(
+                    user_id,
+                    {
+                        "pending_consult": text,
+                        "pending_consult_label": build_consult_label(text),
+                        "phase": PHASE_WAIT_NAME,
+                    },
+                )
+                push_text(
+                    user_id,
+                    "想いは受け取りました。\n"
+                    "まず、あなたを何とお呼びすればよいでしょうか？\n"
+                    "お呼びするお名前だけを送ってください。"
+                )
                 return
 
             if phase == PHASE_WAIT_NAME:
@@ -668,13 +912,14 @@ def process_and_push_reply(
                         "phase": PHASE_WAIT_BIRTH_DATE,
                         "is_profile_confirmed": False,
                         "birth_time_unknown": False,
+                        "birth_place_unknown": False,
                         "plan_status": user_data.get("plan_status", PLAN_FREE),
                         "free_sessions_remaining": int(user_data.get("free_sessions_remaining", DEFAULT_FREE_SESSIONS)),
                     },
                 )
                 send_birthday_picker(
                     user_id,
-                    f"……{clean_name}様ですね。心に刻みました。次に、あなたの生まれた日を教えてください。"
+                    f"……{clean_name}様ですね。次に、生まれた日を教えてください。"
                 )
                 return
 
@@ -686,7 +931,7 @@ def process_and_push_reply(
 
                 send_birthday_picker(
                     user_id,
-                    f"{user_data.get('name', PROFILE_DEFAULT_NAME)}様。観測を始める前に、生まれた日を教えてください。"
+                    f"{user_data.get('name', PROFILE_DEFAULT_NAME)}様。生まれた日を教えてください。"
                 )
                 return
 
@@ -713,12 +958,11 @@ def process_and_push_reply(
                             "birth_hour": hour,
                             "birth_minute": minute,
                             "birth_second": 0,
-                            "birth_longitude": user_data.get("birth_longitude", DEFAULT_BIRTH_LONGITUDE),
                             "birth_time_unknown": False,
-                            "phase": PHASE_WAIT_PROFILE_CONFIRM,
+                            "phase": PHASE_WAIT_BIRTH_PREFECTURE,
                         },
                     )
-                    send_profile_confirm(user_id, birth_date, f"{hour:02d}:{minute:02d}頃")
+                    send_birth_prefecture_prompt(user_id)
                     return
 
                 if text == "UNKNOWN_TIME":
@@ -728,15 +972,65 @@ def process_and_push_reply(
                             "birth_hour": DEFAULT_UNKNOWN_HOUR,
                             "birth_minute": DEFAULT_UNKNOWN_MINUTE,
                             "birth_second": DEFAULT_UNKNOWN_SECOND,
-                            "birth_longitude": user_data.get("birth_longitude", DEFAULT_BIRTH_LONGITUDE),
                             "birth_time_unknown": True,
-                            "phase": PHASE_WAIT_PROFILE_CONFIRM,
+                            "phase": PHASE_WAIT_BIRTH_PREFECTURE,
                         },
                     )
-                    send_profile_confirm(user_id, birth_date, "不明（正午として計算）")
+                    send_birth_prefecture_prompt(user_id)
                     return
 
                 send_time_picker(user_id)
+                return
+
+            if phase == PHASE_WAIT_BIRTH_PREFECTURE:
+                t = normalize_text(text)
+                if not t:
+                    send_birth_prefecture_prompt(user_id)
+                    return
+
+                if t in {"不明", "わからない", "分からない", "海外"}:
+                    save_user(
+                        user_id,
+                        {
+                            "birth_prefecture": "不明",
+                            "birth_place_unknown": True,
+                            "birth_longitude": DEFAULT_BIRTH_LONGITUDE,
+                            "phase": PHASE_WAIT_PROFILE_CONFIRM,
+                        },
+                    )
+                    send_profile_confirm(
+                        user_id,
+                        user_data.get("birth_date", "未設定"),
+                        finalize_profile_confirm_text(load_user(user_id)),
+                        "不明（代表経度で計算）",
+                    )
+                    return
+
+                detected_lon = detect_prefecture_longitude(t)
+                detected_pref = detect_prefecture_label(t)
+                if detected_lon is None:
+                    push_text(
+                        user_id,
+                        "都道府県名で送ってください。\n"
+                        "分からない場合は『不明』でも大丈夫です。"
+                    )
+                    return
+
+                save_user(
+                    user_id,
+                    {
+                        "birth_prefecture": detected_pref or t,
+                        "birth_place_unknown": False,
+                        "birth_longitude": detected_lon,
+                        "phase": PHASE_WAIT_PROFILE_CONFIRM,
+                    },
+                )
+                send_profile_confirm(
+                    user_id,
+                    user_data.get("birth_date", "未設定"),
+                    finalize_profile_confirm_text(load_user(user_id)),
+                    detected_pref or t,
+                )
                 return
 
             if phase == PHASE_WAIT_PROFILE_CONFIRM:
@@ -748,26 +1042,28 @@ def process_and_push_reply(
                     yn = normalize_yes_no(text)
 
                 if yn == "yes":
-                    save_user(user_id, {"is_profile_confirmed": True, "phase": PHASE_WAIT_RESTART_CONFIRM})
-                    push_text(
-                        user_id,
-                        f"刻印が完成しました。今、{user_data.get('name', PROFILE_DEFAULT_NAME)}様が一番視たいことは何でしょうか。"
-                    )
+                    save_user(user_id, {"is_profile_confirmed": True, "phase": PHASE_WAIT_MOTIF})
+                    sampled = send_motif_picker(user_id)
+                    save_user(user_id, {"last_presented_motifs": sampled})
                     return
 
                 if yn == "no":
                     save_user(user_id, {"is_profile_confirmed": False, "phase": PHASE_WAIT_BIRTH_DATE})
                     delete_user_fields(
                         user_id,
-                        ["birth_date", "birth_hour", "birth_minute", "birth_second", "birth_time_unknown"]
+                        [
+                            "birth_date", "birth_hour", "birth_minute", "birth_second",
+                            "birth_time_unknown", "birth_prefecture", "birth_place_unknown", "birth_longitude"
+                        ]
                     )
-                    send_birthday_picker(user_id, "承知いたしました。では、もう一度生まれた日を正しく教えてください。")
+                    send_birthday_picker(user_id, "承知しました。では、もう一度生まれた日を教えてください。")
                     return
 
                 send_profile_confirm(
                     user_id,
                     user_data.get("birth_date", "未設定"),
                     finalize_profile_confirm_text(user_data),
+                    finalize_prefecture_confirm_text(user_data),
                 )
                 return
 
@@ -780,33 +1076,48 @@ def process_and_push_reply(
                     yn = normalize_yes_no(text)
 
                 if yn is None and text:
+                    reason = detect_disallowed_reason(text)
+                    if reason:
+                        push_text(user_id, build_disallowed_message(reason))
+                        return
+
+                    if is_same_consult_repeated(user_data, text):
+                        push_text(
+                            user_id,
+                            "前とまったく同じ問いをすぐに重ねると、像が揺れてしまいます。\n"
+                            "少し角度を変えるか、別の想いを置いてみてください。"
+                        )
+                        return
+
                     save_user(user_id, {"temp_restart_text": text})
                     send_restart_confirm(user_id)
                     return
 
                 if yn == "no":
                     delete_user_fields(user_id, ["temp_restart_text"])
-                    push_text(user_id, "承知いたしました。私はまた淵にてお待ちしております。")
+                    push_text(user_id, "承知しました。私はまた静かな縁にてお待ちしております。")
                     return
 
                 if yn == "yes":
-                    if not can_start_paid_reading(user_data):
-                        save_user(user_id, {"phase": PHASE_WAIT_PAYMENT})
-                        push_text(user_id, get_payment_guide_text(user_data))
-                        return
-
-                    consult_seed = user_data.get("temp_restart_text", "これからの運勢")
+                    consult_seed = user_data.get("temp_restart_text", "")
                     consult_seed = normalize_text(consult_seed)
+
+                    if not consult_seed:
+                        push_text(user_id, "今回はどの様な想いをお持ちになりましたか？")
+                        return
 
                     if len(consult_seed) <= 15:
                         save_user(
                             user_id,
-                            {"temp_category": consult_seed, "phase": PHASE_WAIT_CONSULT_DETAIL},
+                            {
+                                "temp_category": consult_seed,
+                                "phase": PHASE_WAIT_CONSULT_DETAIL,
+                            },
                         )
                         push_text(
                             user_id,
-                            f"……「{consult_seed}」についてですね。その奥にある想いを、もう少しだけ詳しく教えていただけますか？\n"
-                            "（具体的な状況や、今感じている不安などを教えていただけると、より深く観測できます）"
+                            f"『{consult_seed}』についてですね。\n"
+                            "いま胸の内にある背景や、最近の空気感をもう少しだけ教えてください。"
                         )
                         return
 
@@ -814,6 +1125,7 @@ def process_and_push_reply(
                         user_id,
                         {
                             "pending_consult": consult_seed,
+                            "pending_consult_label": build_consult_label(consult_seed),
                             "temp_restart_text": DELETE_FIELD,
                             "temp_category": DELETE_FIELD,
                             "phase": PHASE_WAIT_MOTIF,
@@ -828,14 +1140,15 @@ def process_and_push_reply(
                 return
 
             if phase == PHASE_WAIT_CONSULT_DETAIL:
-                category = user_data.get("temp_category", "これからの運勢")
-                detail = text if text else "詳しい事情はまだ言葉にならない"
-                combined_consult = f"{category}（詳細：{detail}）"
+                category = user_data.get("temp_category", "いまの想い")
+                detail = text if text else "まだ言葉にはなり切っていない"
+                combined_consult = f"{category}\n背景: {detail}"
 
                 save_user(
                     user_id,
                     {
                         "pending_consult": combined_consult,
+                        "pending_consult_label": build_consult_label(category),
                         "temp_category": DELETE_FIELD,
                         "temp_restart_text": DELETE_FIELD,
                         "phase": PHASE_WAIT_MOTIF,
@@ -869,21 +1182,39 @@ def process_and_push_reply(
                         )
                     return
 
+                if not can_start_initial_reading(user_data):
+                    save_user(user_id, {"phase": PHASE_WAIT_PAYMENT})
+                    push_text(user_id, get_payment_guide_text(user_data))
+                    return
+
                 profile = build_user_profile(user_data)
                 required_keys = ["birth_year", "birth_month", "birth_day"]
                 missing = [k for k in required_keys if k not in profile]
                 if missing:
                     logger.warning("profile missing keys user_id=%s missing=%s profile=%s", user_id, missing, profile)
-                    push_text(user_id, "刻印に不足があるようです。リセットして、もう一度最初から刻印を整えてください。")
+                    push_text(user_id, "刻印に不足があるようです。リセットして、もう一度最初から整えてください。")
                     return
 
                 consult_text = user_data.get("pending_consult", "これからの運勢")
+                reason = detect_disallowed_reason(consult_text)
+                if reason:
+                    push_text(user_id, build_disallowed_message(reason))
+                    return
+
+                if is_same_consult_repeated(user_data, consult_text):
+                    push_text(
+                        user_id,
+                        "前と同じ問いを続けて読むと、水面が濁ります。\n"
+                        "少し別の角度から問い直してみてください。"
+                    )
+                    return
+
                 logger.info(
                     "oracle start user_id=%s motif=%s consult=%s profile=%s",
-                    user_id, motif_label, consult_text[:80], profile
+                    user_id, motif_label, consult_text[:120], profile
                 )
 
-                push_text(user_id, "想いは届きました。神託を降ろしています。")
+                push_text(user_id, "想いは届きました。天伝詔が詠歌を読んでいます。")
                 consume_session_credit_if_needed(user_id, user_data)
 
                 result = oracle_engine.predict(
@@ -896,7 +1227,7 @@ def process_and_push_reply(
                 reply_text = result["message"]
                 log_usage_if_any(result, user_id)
 
-                history = f"識の神託: {reply_text}\n"
+                history = f"識の詠歌: {reply_text}\n"
                 history = trim_history(history)
 
                 session_id = create_new_session(user_id, user_data, consult_text, motif_label)
@@ -911,67 +1242,96 @@ def process_and_push_reply(
                 save_user(
                     user_id,
                     {
-                        "phase": PHASE_WAIT_FOLLOWUP_CONFIRM,
+                        "phase": PHASE_WAIT_COLDREAD_RESPONSE,
                         "is_dialogue_mode": False,
                         "chat_history": history,
                         "last_motif": motif_label,
                         "last_oracle_message": reply_text,
                         "last_oracle_summary": result.get("summary", {}),
                         "last_consult_text": consult_text,
-                        "last_consult_label": consult_text[:18],
+                        "last_consult_label": user_data.get("pending_consult_label", build_consult_label(consult_text)),
                         "pending_consult": DELETE_FIELD,
+                        "pending_consult_label": DELETE_FIELD,
                         "temp_category": DELETE_FIELD,
                         "temp_restart_text": DELETE_FIELD,
                     },
                 )
                 push_text(user_id, reply_text)
-                send_followup_confirm(user_id)
+                send_coldread_options(user_id)
                 return
 
-            if phase == PHASE_WAIT_FOLLOWUP_CONFIRM:
-                yn = None
-                if text == "FOLLOWUP_YES":
-                    yn = "yes"
-                elif text == "FOLLOWUP_NO":
-                    yn = "no"
+            if phase == PHASE_WAIT_COLDREAD_RESPONSE:
+                value = coldread_value or normalize_text(text)
+
+                if value in {"ありました", "yes"}:
+                    normalized_value = "yes"
+                elif value in {"少しあります", "partial"}:
+                    normalized_value = "partial"
+                elif value in {"どちらとも言えない", "unclear"}:
+                    normalized_value = "unclear"
                 else:
-                    yn = normalize_yes_no(text)
+                    normalized_value = "unknown"
 
-                if yn == "yes":
-                    save_user(user_id, {"phase": PHASE_WAIT_FOLLOWUP_MENU})
-                    send_followup_menu(user_id, user_data)
-                    return
+                session_id = user_data.get("current_session_id")
+                if session_id:
+                    append_session_message(
+                        user_id,
+                        session_id,
+                        "user",
+                        f"照合の答え: {normalized_value}",
+                    )
 
-                if yn == "no":
-                    save_user(user_id, {"phase": PHASE_WAIT_RESTART_CONFIRM})
-                    push_text(user_id, "承知しました。また別の流れを視たくなった時は声をかけてください。")
-                    return
-
-                send_followup_confirm(user_id)
+                history = trim_history(user_data.get("chat_history", "") + f"照合の答え: {normalized_value}\n")
+                save_user(
+                    user_id,
+                    {
+                        "phase": PHASE_WAIT_FOLLOWUP_MENU,
+                        "last_coldread_reply": normalized_value,
+                        "chat_history": history,
+                    },
+                )
+                push_text(user_id, build_coldread_ack(normalized_value))
+                send_followup_menu(user_id, load_user(user_id))
                 return
 
             if phase == PHASE_WAIT_FOLLOWUP_MENU:
-                kind = followup_kind or text
+                kind = followup_kind or normalize_flow_kind(text) or text
 
                 if kind == "end":
-                    save_user(user_id, {"phase": PHASE_WAIT_RESTART_CONFIRM})
+                    session_id = user_data.get("current_session_id")
+                    if session_id:
+                        close_session(user_id, session_id)
+
+                    save_user(
+                        user_id,
+                        {
+                            "phase": PHASE_WAIT_RESTART_CONFIRM,
+                            "is_dialogue_mode": False,
+                            "current_session_id": DELETE_FIELD,
+                            "chat_history": DELETE_FIELD,
+                        },
+                    )
                     push_text(user_id, "では、ここで灯りを静かに閉じます。また必要なときに声をかけてください。")
                     return
 
                 if kind == "other":
                     save_user(user_id, {"phase": PHASE_WAIT_RESTART_CONFIRM})
-                    push_text(user_id, "新しく視たいことを教えてください。")
+                    push_text(user_id, "新しく読みたい想いを教えてください。")
                     return
 
                 plan = user_data.get("plan_status", PLAN_FREE)
-                if kind in {"today", "month"} and plan == PLAN_FREE:
+                if kind in {"today", "week", "month"} and plan == PLAN_FREE:
                     push_text(user_id, get_payment_guide_text(user_data))
                     return
-                if kind == "year" and plan != PLAN_PREMIUM:
+                if kind in {"halfyear", "year"} and plan != PLAN_PREMIUM:
                     if plan == PLAN_PAID:
                         push_text(user_id, get_premium_guide_text(user_data))
                     else:
                         push_text(user_id, get_payment_guide_text(user_data))
+                    return
+
+                if kind not in {"today", "week", "month", "halfyear", "year"}:
+                    send_followup_menu(user_id, user_data)
                     return
 
                 profile = build_user_profile(user_data)
@@ -1039,23 +1399,6 @@ def process_and_push_reply(
                         extra={"summary": result.get("summary", {})},
                     )
 
-                if "[END_SESSION]" in reply_text:
-                    reply_text = reply_text.replace("[END_SESSION]", "").strip()
-                    if session_id:
-                        close_session(user_id, session_id)
-
-                    save_user(
-                        user_id,
-                        {
-                            "is_dialogue_mode": False,
-                            "phase": PHASE_WAIT_RESTART_CONFIRM,
-                            "current_session_id": DELETE_FIELD,
-                            "chat_history": DELETE_FIELD,
-                        },
-                    )
-                    push_text(user_id, reply_text)
-                    return
-
                 user_name = user_data.get("name", PROFILE_DEFAULT_NAME)
                 new_history = history + f"{user_name}: {text}\n識: {reply_text}\n"
                 save_user(user_id, {"chat_history": trim_history(new_history)})
@@ -1064,7 +1407,7 @@ def process_and_push_reply(
 
             logger.warning("unknown phase user_id=%s phase=%s", user_id, phase)
             save_user(user_id, {"phase": PHASE_WAIT_RESTART_CONFIRM})
-            push_text(user_id, "少し視界が揺らぎました。もう一度、今視たいことを教えてください。")
+            push_text(user_id, "少し視界が揺らぎました。もう一度、いま読みたい想いを教えてください。")
 
         except Exception:
             logger.exception("Error while processing reply for user_id=%s", user_id)
@@ -1155,9 +1498,12 @@ def handle_postback(event: PostbackEvent):
         threading.Thread(target=process_and_push_reply, args=(user_id, "UNKNOWN_TIME"), daemon=True).start()
         return
 
-    if action == "followup_confirm":
-        text_val = "FOLLOWUP_YES" if query.get("res") == "yes" else "FOLLOWUP_NO"
-        threading.Thread(target=process_and_push_reply, args=(user_id, text_val), daemon=True).start()
+    if action == "coldread_reply":
+        threading.Thread(
+            target=process_and_push_reply,
+            args=(user_id, "", None, None, None, None, query.get("value")),
+            daemon=True,
+        ).start()
         return
 
     if action == "followup_menu":
